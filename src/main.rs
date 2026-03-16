@@ -1,10 +1,19 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant}
 };
 
 use anyhow::Result;
-use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    extract::{Extension, Form, Query},
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
 use octocrab::Octocrab;
 use rmcp::{
     ServerHandler,
@@ -31,7 +40,263 @@ fn github_user() -> String {
 }
 
 fn work_dir() -> PathBuf {
-    PathBuf::from("/tmp/mamcp")
+    PathBuf::from("/tmp/sandcastle")
+}
+
+// ── Auth state ───────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+struct PendingCode {
+    created_at: Instant,
+    redirect_uri: Option<String>,
+    client_id: String,
+}
+
+struct AuthState {
+    pending_codes: RwLock<HashMap<String, PendingCode>>,
+    valid_tokens: RwLock<HashMap<String, String>>, // token -> client_id
+    base_url: String,
+    no_auth: bool,
+}
+
+type SharedAuthState = Arc<AuthState>;
+
+fn generate_token() -> String {
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/urandom").expect("cannot open /dev/urandom");
+    let mut buf = [0u8; 32];
+    f.read_exact(&mut buf).expect("cannot read /dev/urandom");
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// ── Auth middleware ───────────────────────────────────────────────────────────
+
+async fn require_auth(
+    Extension(auth): Extension<SharedAuthState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let token = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    if auth.no_auth
+        || token
+            .map(|t| auth.valid_tokens.read().unwrap().contains_key(t))
+            .unwrap_or(false)
+    {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(
+                "WWW-Authenticate",
+                format!(
+                    "Bearer realm=\"{base}\", resource_metadata=\"{base}/.well-known/oauth-protected-resource\"",
+                    base = auth.base_url
+                ),
+            )],
+        )
+            .into_response()
+    }
+}
+
+// ── Auth endpoint parameter types ─────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AuthorizeParams {
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
+    state: Option<String>,
+    #[allow(dead_code)]
+    response_type: Option<String>,
+    #[allow(dead_code)]
+    code_challenge: Option<String>,
+    #[allow(dead_code)]
+    code_challenge_method: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApproveForm {
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
+    state: Option<String>,
+}
+
+// Dynamic Client Registration request (RFC 7591) — we accept anything, assign a client_id
+#[derive(Deserialize)]
+struct RegisterRequest {
+    client_name: Option<String>,
+    redirect_uris: Option<Vec<String>>,
+    // All other fields are accepted and silently ignored
+}
+
+#[derive(Deserialize)]
+struct TokenRequest {
+    #[allow(dead_code)]
+    grant_type: Option<String>,
+    code: String,
+    #[allow(dead_code)]
+    redirect_uri: Option<String>,
+    #[allow(dead_code)]
+    client_id: Option<String>,
+    #[allow(dead_code)]
+    code_verifier: Option<String>,
+}
+
+// ── Auth handlers ─────────────────────────────────────────────────────────────
+
+async fn oauth_protected_resource(
+    Extension(auth): Extension<SharedAuthState>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "resource": auth.base_url,
+        "authorization_servers": [auth.base_url]
+    }))
+}
+
+async fn oauth_authorization_server(
+    Extension(auth): Extension<SharedAuthState>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "issuer": auth.base_url,
+        "authorization_endpoint": format!("{}/authorize", auth.base_url),
+        "token_endpoint": format!("{}/token", auth.base_url),
+        "registration_endpoint": format!("{}/register", auth.base_url),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"],
+        "client_id_metadata_document_supported": true
+    }))
+}
+
+async fn authorize_page(
+    Query(params): Query<AuthorizeParams>,
+) -> impl IntoResponse {
+    let client_id = params.client_id.unwrap_or_default();
+    let redirect_uri = params.redirect_uri.unwrap_or_default();
+    let state = params.state.unwrap_or_default();
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+  <title>Sandcastle — MCP Access Request</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; max-width: 480px; margin: 80px auto; padding: 0 16px; }}
+    h2 {{ margin-bottom: 8px; }}
+    p {{ color: #555; margin-bottom: 24px; }}
+    button {{ background: #1a1a1a; color: #fff; border: none; padding: 10px 20px;
+              font-size: 15px; border-radius: 6px; cursor: pointer; }}
+    button:hover {{ background: #333; }}
+    code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 4px; font-size: 13px; }}
+  </style>
+</head>
+<body>
+  <h2>MCP Access Request</h2>
+  <p>Client <code>{client_id}</code> is requesting access to this Sandcastle MCP server.</p>
+  <form method="POST" action="/authorize/approve">
+    <input type="hidden" name="client_id" value="{client_id}">
+    <input type="hidden" name="redirect_uri" value="{redirect_uri}">
+    <input type="hidden" name="state" value="{state}">
+    <button type="submit">Approve Access</button>
+  </form>
+</body>
+</html>"#
+    );
+
+    (StatusCode::OK, [("Content-Type", "text/html")], html)
+}
+
+async fn authorize_approve(
+    Extension(auth): Extension<SharedAuthState>,
+    Form(form): Form<ApproveForm>,
+) -> impl IntoResponse {
+    let code = generate_token();
+    let client_id = form.client_id.clone().unwrap_or_default();
+    let redirect_uri = form.redirect_uri.clone();
+
+    {
+        let mut codes = auth.pending_codes.write().unwrap();
+        codes.insert(
+            code.clone(),
+            PendingCode {
+                created_at: Instant::now(),
+                redirect_uri: redirect_uri.clone(),
+                client_id: client_id.clone(),
+            },
+        );
+    }
+
+    let base_redirect = redirect_uri.unwrap_or_else(|| format!("{}/", auth.base_url));
+    let location = if let Some(s) = &form.state {
+        format!("{base_redirect}?code={code}&state={s}")
+    } else {
+        format!("{base_redirect}?code={code}")
+    };
+
+    (StatusCode::FOUND, [("Location", location)])
+}
+
+async fn token_endpoint(
+    Extension(auth): Extension<SharedAuthState>,
+    Form(req): Form<TokenRequest>,
+) -> impl IntoResponse {
+    let code_data = {
+        let mut codes = auth.pending_codes.write().unwrap();
+        codes.remove(&req.code)
+    };
+
+    match code_data {
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "Code not found or already used"
+            })),
+        ),
+        Some(c) if c.created_at.elapsed() > Duration::from_secs(300) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "Code expired"
+            })),
+        ),
+        Some(c) => {
+            let token = generate_token();
+            auth.valid_tokens
+                .write()
+                .unwrap()
+                .insert(token.clone(), c.client_id.clone());
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "access_token": token,
+                    "token_type": "Bearer"
+                })),
+            )
+        }
+    }
+}
+
+// Dynamic Client Registration (RFC 7591) — accept any client, assign a client_id
+async fn register_client(
+    axum::extract::Json(req): axum::extract::Json<RegisterRequest>,
+) -> impl IntoResponse {
+    let client_id = generate_token();
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "client_id": client_id,
+            "client_name": req.client_name.unwrap_or_else(|| "MCP Client".to_string()),
+            "redirect_uris": req.redirect_uris.unwrap_or_default(),
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none"
+        })),
+    )
 }
 
 // ── Parameter types ──────────────────────────────────────────────────────────
@@ -123,7 +388,7 @@ impl GithubManager {
         }
     }
 
-    #[tool(description = "Clone a GitHub repository to /tmp/mamcp/<repo>. Returns the local path.")]
+    #[tool(description = "Clone a GitHub repository to /tmp/sandcastle/<repo>. Returns the local path.")]
     async fn clone_repository(
         &self,
         Parameters(CloneRepoParams { repo }): Parameters<CloneRepoParams>,
@@ -223,8 +488,8 @@ impl GithubManager {
 
         // Configure git identity
         for args in &[
-            vec!["config", "user.email", "mamcp@localhost"],
-            vec!["config", "user.name", "mamcp"],
+            vec!["config", "user.email", "sandcastle@localhost"],
+            vec!["config", "user.name", "sandcastle"],
         ] {
             let _ = Command::new("git")
                 .args(args)
@@ -327,20 +592,15 @@ impl ServerHandler for GithubManager {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-async fn not_found() -> impl IntoResponse {
-    StatusCode::NOT_FOUND
-}
-
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stdout)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("mamcp=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("sandcastle=info")),
         )
         .init();
 
@@ -349,25 +609,70 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(3000);
 
+    let base_url = std::env::var("BASE_URL")
+        .unwrap_or_else(|_| format!("http://localhost:{port}"));
+
+    let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
+
+    // Build auth state
+    let auth_state: SharedAuthState = Arc::new(AuthState {
+        pending_codes: RwLock::new(HashMap::new()),
+        valid_tokens: RwLock::new(HashMap::new()),
+        base_url: base_url.clone(),
+        no_auth,
+    });
+
+    if no_auth {
+        info!("auth: disabled (SANDCASTLE_NO_AUTH is set)");
+    } else if let Ok(token) = std::env::var("MCP_TOKEN") {
+        auth_state
+            .valid_tokens
+            .write()
+            .unwrap()
+            .insert(token, "env".to_string());
+        info!("auth: using pre-shared token from MCP_TOKEN");
+    } else {
+        info!("auth: open {base_url}/authorize to approve MCP access");
+    }
+
     let service = StreamableHttpService::new(
         || Ok(GithubManager::new()),
         LocalSessionManager::default().into(),
         Default::default(),
     );
 
-    // Claude's MCP connector hits / for the protocol and also probes OAuth endpoints.
-    // Returning 404 on oauth-protected-resource tells it no auth is required.
-    // The MCP service itself must be at / (not /mcp).
+    // route_layer applies middleware only to routes defined before it,
+    // so /authorize, /token, and /.well-known/* remain unauthenticated.
     let app = Router::new()
         .route_service("/", service)
-        .route("/.well-known/oauth-protected-resource", get(not_found))
-        .route("/.well-known/oauth-authorization-server", get(not_found))
+        .route_layer(middleware::from_fn(require_auth))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_authorization_server),
+        )
+        .route("/authorize", get(authorize_page))
+        .route("/authorize/approve", post(authorize_approve))
+        .route("/token", post(token_endpoint))
+        .route("/register", post(register_client))
+        .layer(Extension(auth_state))
         .layer(CorsLayer::permissive());
 
     let addr = format!("0.0.0.0:{port}");
-    info!("mamcp listening on {addr}");
+    info!("sandcastle listening on {addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = axum::serve(listener, app) => {}
+        _ = sigterm.recv() => { info!("received SIGTERM, shutting down"); }
+        _ = tokio::signal::ctrl_c() => { info!("received SIGINT, shutting down"); }
+    }
 
     Ok(())
 }
