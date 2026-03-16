@@ -26,8 +26,8 @@ use rmcp::transport::streamable_http_server::{
 };
 use serde::Deserialize;
 use tokio::process::Command;
-use tower_http::cors::CorsLayer;
-use tracing::info;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tracing::{debug, info};
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -57,6 +57,7 @@ struct AuthState {
     valid_tokens: RwLock<HashMap<String, String>>, // token -> client_id
     base_url: String,
     no_auth: bool,
+    password: Option<String>,
 }
 
 type SharedAuthState = Arc<AuthState>;
@@ -82,24 +83,27 @@ async fn require_auth(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
 
-    if auth.no_auth
-        || token
-            .map(|t| auth.valid_tokens.read().unwrap().contains_key(t))
-            .unwrap_or(false)
-    {
-        next.run(request).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            [(
-                "WWW-Authenticate",
-                format!(
-                    "Bearer realm=\"{base}\", resource_metadata=\"{base}/.well-known/oauth-protected-resource\"",
-                    base = auth.base_url
-                ),
-            )],
-        )
-            .into_response()
+    if auth.no_auth {
+        return next.run(request).await;
+    }
+
+    match token {
+        Some(t) if auth.valid_tokens.read().unwrap().contains_key(t) => {
+            debug!("auth: token accepted");
+            next.run(request).await
+        }
+        Some(t) => {
+            debug!("auth: unknown token {t:.8}...");
+            (StatusCode::UNAUTHORIZED, [("WWW-Authenticate",
+                format!("Bearer realm=\"{base}\", resource_metadata=\"{base}/.well-known/oauth-protected-resource\"",
+                    base = auth.base_url))]).into_response()
+        }
+        None => {
+            debug!("auth: no token");
+            (StatusCode::UNAUTHORIZED, [("WWW-Authenticate",
+                format!("Bearer realm=\"{base}\", resource_metadata=\"{base}/.well-known/oauth-protected-resource\"",
+                    base = auth.base_url))]).into_response()
+        }
     }
 }
 
@@ -123,6 +127,7 @@ struct ApproveForm {
     client_id: Option<String>,
     redirect_uri: Option<String>,
     state: Option<String>,
+    password: Option<String>,
 }
 
 // Dynamic Client Registration request (RFC 7591) — we accept anything, assign a client_id
@@ -172,15 +177,20 @@ async fn oauth_authorization_server(
     }))
 }
 
-async fn authorize_page(
-    Query(params): Query<AuthorizeParams>,
-) -> impl IntoResponse {
-    let client_id = params.client_id.unwrap_or_default();
-    let redirect_uri = params.redirect_uri.unwrap_or_default();
-    let state = params.state.unwrap_or_default();
-
-    let html = format!(
-        r#"<!DOCTYPE html>
+fn approval_html(client_id: &str, redirect_uri: &str, state: &str, needs_password: bool, error: Option<&str>) -> String {
+    let password_field = if needs_password {
+        r#"<input type="password" name="password" placeholder="Password" required
+             style="display:block;width:100%;padding:8px 10px;margin-bottom:12px;
+                    font-size:15px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;">"#
+    } else {
+        ""
+    };
+    let error_html = if let Some(msg) = error {
+        format!(r#"<p style="color:#c00;margin-bottom:16px;">{msg}</p>"#)
+    } else {
+        String::new()
+    };
+    format!(r#"<!DOCTYPE html>
 <html>
 <head>
   <title>Sandcastle — MCP Access Request</title>
@@ -189,7 +199,7 @@ async fn authorize_page(
     h2 {{ margin-bottom: 8px; }}
     p {{ color: #555; margin-bottom: 24px; }}
     button {{ background: #1a1a1a; color: #fff; border: none; padding: 10px 20px;
-              font-size: 15px; border-radius: 6px; cursor: pointer; }}
+              font-size: 15px; border-radius: 6px; cursor: pointer; width: 100%; }}
     button:hover {{ background: #333; }}
     code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 4px; font-size: 13px; }}
   </style>
@@ -197,23 +207,45 @@ async fn authorize_page(
 <body>
   <h2>MCP Access Request</h2>
   <p>Client <code>{client_id}</code> is requesting access to this Sandcastle MCP server.</p>
+  {error_html}
   <form method="POST" action="/authorize/approve">
     <input type="hidden" name="client_id" value="{client_id}">
     <input type="hidden" name="redirect_uri" value="{redirect_uri}">
     <input type="hidden" name="state" value="{state}">
+    {password_field}
     <button type="submit">Approve Access</button>
   </form>
 </body>
-</html>"#
-    );
+</html>"#)
+}
 
+async fn authorize_page(
+    Extension(auth): Extension<SharedAuthState>,
+    Query(params): Query<AuthorizeParams>,
+) -> impl IntoResponse {
+    let client_id = params.client_id.unwrap_or_default();
+    let redirect_uri = params.redirect_uri.unwrap_or_default();
+    let state = params.state.unwrap_or_default();
+    let html = approval_html(&client_id, &redirect_uri, &state, auth.password.is_some(), None);
     (StatusCode::OK, [("Content-Type", "text/html")], html)
 }
 
 async fn authorize_approve(
     Extension(auth): Extension<SharedAuthState>,
     Form(form): Form<ApproveForm>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(expected) = &auth.password {
+        let provided = form.password.as_deref().unwrap_or("");
+        if provided != expected.as_str() {
+            debug!("approve: wrong password");
+            let client_id = form.client_id.as_deref().unwrap_or("");
+            let redirect_uri = form.redirect_uri.as_deref().unwrap_or("");
+            let state = form.state.as_deref().unwrap_or("");
+            let html = approval_html(client_id, redirect_uri, state, true, Some("Incorrect password."));
+            return (StatusCode::UNAUTHORIZED, [("Content-Type", "text/html")], html).into_response();
+        }
+    }
+
     let code = generate_token();
     let client_id = form.client_id.clone().unwrap_or_default();
     let redirect_uri = form.redirect_uri.clone();
@@ -231,13 +263,15 @@ async fn authorize_approve(
     }
 
     let base_redirect = redirect_uri.unwrap_or_else(|| format!("{}/", auth.base_url));
+    let sep = if base_redirect.contains('?') { '&' } else { '?' };
     let location = if let Some(s) = &form.state {
-        format!("{base_redirect}?code={code}&state={s}")
+        format!("{base_redirect}{sep}code={code}&state={s}")
     } else {
-        format!("{base_redirect}?code={code}")
+        format!("{base_redirect}{sep}code={code}")
     };
 
-    (StatusCode::FOUND, [("Location", location)])
+    debug!("approve: client_id={client_id:.8}... -> redirecting to {location:.60}...");
+    (StatusCode::FOUND, [("Location", location)]).into_response()
 }
 
 async fn token_endpoint(
@@ -250,33 +284,28 @@ async fn token_endpoint(
     };
 
     match code_data {
-        None => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
+        None => {
+            debug!("token: code not found: {:.8}...", req.code);
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
                 "error": "invalid_grant",
                 "error_description": "Code not found or already used"
-            })),
-        ),
-        Some(c) if c.created_at.elapsed() > Duration::from_secs(300) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
+            })))
+        }
+        Some(c) if c.created_at.elapsed() > Duration::from_secs(300) => {
+            debug!("token: code expired");
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
                 "error": "invalid_grant",
                 "error_description": "Code expired"
-            })),
-        ),
+            })))
+        }
         Some(c) => {
             let token = generate_token();
-            auth.valid_tokens
-                .write()
-                .unwrap()
-                .insert(token.clone(), c.client_id.clone());
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "access_token": token,
-                    "token_type": "Bearer"
-                })),
-            )
+            auth.valid_tokens.write().unwrap().insert(token.clone(), c.client_id.clone());
+            debug!("token: issued {token:.8}... for client {:.8}...", c.client_id);
+            (StatusCode::OK, Json(serde_json::json!({
+                "access_token": token,
+                "token_type": "Bearer"
+            })))
         }
     }
 }
@@ -286,12 +315,15 @@ async fn register_client(
     axum::extract::Json(req): axum::extract::Json<RegisterRequest>,
 ) -> impl IntoResponse {
     let client_id = generate_token();
+    let name = req.client_name.unwrap_or_else(|| "MCP Client".to_string());
+    let uris = req.redirect_uris.unwrap_or_default();
+    debug!("register: client_name={name:?} redirect_uris={uris:?} -> client_id={client_id:.8}...");
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
             "client_id": client_id,
-            "client_name": req.client_name.unwrap_or_else(|| "MCP Client".to_string()),
-            "redirect_uris": req.redirect_uris.unwrap_or_default(),
+            "client_name": name,
+            "redirect_uris": uris,
             "grant_types": ["authorization_code"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none"
@@ -613,6 +645,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| format!("http://localhost:{port}"));
 
     let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
+    let password = std::env::var("SANDCASTLE_PASSWORD").ok();
 
     // Build auth state
     let auth_state: SharedAuthState = Arc::new(AuthState {
@@ -620,11 +653,16 @@ async fn main() -> Result<()> {
         valid_tokens: RwLock::new(HashMap::new()),
         base_url: base_url.clone(),
         no_auth,
+        password,
     });
 
     if no_auth {
         info!("auth: disabled (SANDCASTLE_NO_AUTH is set)");
-    } else if let Ok(token) = std::env::var("MCP_TOKEN") {
+    } else if auth_state.password.is_some() {
+        info!("auth: password required to approve OAuth flow");
+    }
+
+    if let Ok(token) = std::env::var("MCP_TOKEN") {
         auth_state
             .valid_tokens
             .write()
@@ -659,7 +697,8 @@ async fn main() -> Result<()> {
         .route("/token", post(token_endpoint))
         .route("/register", post(register_client))
         .layer(Extension(auth_state))
-        .layer(CorsLayer::permissive());
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http());
 
     let addr = format!("0.0.0.0:{port}");
     info!("sandcastle listening on {addr}");
