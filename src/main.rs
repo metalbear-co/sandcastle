@@ -2,7 +2,7 @@ mod auth;
 mod handler;
 mod sandbox_providers;
 
-use std::{collections::HashMap, sync::{Arc, RwLock}};
+use std::{collections::HashMap, sync::{Arc, RwLock}, time::Duration};
 
 use anyhow::Result;
 use axum::{
@@ -23,6 +23,7 @@ use auth::handlers::{
 };
 use auth::middleware::require_auth;
 use handler::SandcastleHandler;
+use sandbox_providers::{local::LocalProvider, Provider};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -70,8 +71,12 @@ async fn main() -> Result<()> {
         info!("auth: open {base_url}/authorize to approve MCP access");
     }
 
+    let local = LocalProvider::new(Duration::from_secs(120 * 60));
+    local.start_cleanup_task();
+    let providers: Vec<Arc<dyn Provider>> = vec![local];
+
     let service = StreamableHttpService::new(
-        || Ok(SandcastleHandler::new()),
+        move || Ok(SandcastleHandler::new(providers.clone())),
         LocalSessionManager::default().into(),
         Default::default(),
     );

@@ -13,7 +13,7 @@ use rmcp::{
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::sandbox_providers::{local::LocalProvider, Provider, Sandbox, ROOT_TOOLS};
+use crate::sandbox_providers::{Provider, Sandbox, ROOT_TOOLS};
 
 fn github_token() -> String {
     std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set")
@@ -23,16 +23,18 @@ fn github_user() -> String {
     std::env::var("GITHUB_USER").expect("GITHUB_USER must be set")
 }
 
-fn providers() -> Vec<Box<dyn Provider>> {
-    vec![Box::new(LocalProvider)]
-}
-
 // ── Parameter types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CreateSandboxParams {
     #[schemars(description = "Provider name, e.g. \"local\"")]
     provider: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ResumeSandboxParams {
+    #[schemars(description = "Sandbox ID returned by create_sandbox")]
+    id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -84,11 +86,12 @@ pub struct SandcastleHandler {
     tool_router: ToolRouter<Self>,
     octocrab: Arc<Octocrab>,
     sandbox: Arc<RwLock<Option<Sandbox>>>,
+    providers: Vec<Arc<dyn Provider>>,
 }
 
 #[tool_router]
 impl SandcastleHandler {
-    pub fn new() -> Self {
+    pub fn new(providers: Vec<Arc<dyn Provider>>) -> Self {
         let token = github_token();
         let octocrab = Arc::new(
             Octocrab::builder()
@@ -100,6 +103,7 @@ impl SandcastleHandler {
             tool_router: Self::tool_router(),
             octocrab,
             sandbox: Arc::new(RwLock::new(None)),
+            providers,
         }
     }
 
@@ -109,34 +113,53 @@ impl SandcastleHandler {
 
     #[tool(description = "List available sandbox providers")]
     async fn list_providers(&self) -> String {
-        let list: Vec<serde_json::Value> = providers()
+        let list: Vec<serde_json::Value> = self
+            .providers
             .iter()
             .map(|p| serde_json::json!({ "name": p.name(), "description": p.description() }))
             .collect();
         serde_json::to_string(&list).unwrap_or_default()
     }
 
-    #[tool(description = "Spawn a sandbox with the given provider. Must be called before using any sandbox tools.")]
+    #[tool(description = "Spawn a sandbox with the given provider. Must be called before using any sandbox tools. Returns the sandbox ID which can be used later with resume_sandbox.")]
     async fn create_sandbox(
         &self,
         Parameters(CreateSandboxParams { provider }): Parameters<CreateSandboxParams>,
     ) -> String {
-        let all = providers();
-        let p = all.iter().find(|p| p.name() == provider);
+        let p = self.providers.iter().find(|p| p.name() == provider);
         match p {
             None => {
-                let names: Vec<&str> = all.iter().map(|p| p.name()).collect();
+                let names: Vec<&str> = self.providers.iter().map(|p| p.name()).collect();
                 format!("Unknown provider: {provider}. Available: {}", names.join(", "))
             }
             Some(p) => match p.create().await {
                 Err(e) => e,
                 Ok(sandbox) => {
+                    let id = sandbox.id.clone();
                     let path = sandbox.work_dir.display().to_string();
                     *self.sandbox.write().unwrap() = Some(sandbox);
-                    format!("Sandbox created at {path}")
+                    format!("Sandbox created at {path} (id: {id})")
                 }
             },
         }
+    }
+
+    #[tool(description = "Resume a previously created sandbox by ID. Use the ID returned by create_sandbox.")]
+    async fn resume_sandbox(
+        &self,
+        Parameters(ResumeSandboxParams { id }): Parameters<ResumeSandboxParams>,
+    ) -> String {
+        for p in &self.providers {
+            match p.resume(&id).await {
+                Ok(sandbox) => {
+                    let path = sandbox.work_dir.display().to_string();
+                    *self.sandbox.write().unwrap() = Some(sandbox);
+                    return format!("Resumed sandbox {id} at {path}");
+                }
+                Err(_) => continue,
+            }
+        }
+        format!("Sandbox {id} not found or has expired")
     }
 
     #[tool(description = "List GitHub repositories accessible with the configured token")]
@@ -177,10 +200,10 @@ impl SandcastleHandler {
             return format!("Already cloned at {}", dest.display());
         }
 
-        if let Some(parent) = dest.parent() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return format!("Failed to create directory: {e}");
-            }
+        if let Some(parent) = dest.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            return format!("Failed to create directory: {e}");
         }
 
         let url = format!("https://{user}:{token}@github.com/{repo}.git");
@@ -218,10 +241,10 @@ impl SandcastleHandler {
             return "Error: no sandbox active. Call create_sandbox first.".to_string();
         }
         let p = Path::new(&path);
-        if let Some(parent) = p.parent() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return format!("Failed to create parent dirs: {e}");
-            }
+        if let Some(parent) = p.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            return format!("Failed to create parent dirs: {e}");
         }
         match tokio::fs::write(&path, &content).await {
             Ok(()) => format!("Written {} bytes to {path}", content.len()),
@@ -303,10 +326,10 @@ impl SandcastleHandler {
             .current_dir(&repo_dir)
             .output()
             .await;
-        if let Ok(o) = &add {
-            if !o.status.success() {
-                return format!("git add failed: {}", String::from_utf8_lossy(&o.stderr));
-            }
+        if let Ok(o) = &add
+            && !o.status.success()
+        {
+            return format!("git add failed: {}", String::from_utf8_lossy(&o.stderr));
         }
 
         // Commit

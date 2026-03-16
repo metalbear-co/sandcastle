@@ -2,8 +2,10 @@ pub mod local;
 
 use std::path::PathBuf;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Sandbox {
+    pub id: String,
+    #[allow(dead_code)] // reserved for future provider-specific logic
     pub provider: String,
     pub work_dir: PathBuf,
 }
@@ -13,6 +15,12 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     async fn create(&self) -> Result<Sandbox, String>;
+    async fn resume(&self, id: &str) -> Result<Sandbox, String>;
 }
 
-pub const ROOT_TOOLS: &[&str] = &["list_providers", "list_repositories", "create_sandbox"];
+pub const ROOT_TOOLS: &[&str] = &[
+    "list_providers",
+    "list_repositories",
+    "create_sandbox",
+    "resume_sandbox",
+];
