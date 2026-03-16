@@ -1231,12 +1231,15 @@ name = "sandcastle"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "http-body-util",
  "octocrab",
  "rmcp",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
