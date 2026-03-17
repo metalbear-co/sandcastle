@@ -21,6 +21,9 @@ async-trait = "0.1"
 jsonwebtoken = "9"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 secrecy = "0.10"
+glob = "0.3"
+regex = "1"
+walkdir = "2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

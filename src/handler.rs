@@ -2,6 +2,7 @@ use std::{path::Path, sync::{Arc, RwLock}};
 
 use anyhow::Result;
 use octocrab::{models::InstallationId, Octocrab};
+use regex::Regex;
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -12,6 +13,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 use tokio::process::Command;
+use walkdir::WalkDir;
 
 use crate::github_auth::GitHubCreds;
 use crate::sandbox_providers::{Provider, Sandbox};
@@ -48,22 +50,54 @@ struct CloneRepoParams {
 struct ReadFileParams {
     #[schemars(description = "Absolute path to the file to read")]
     path: String,
+    #[schemars(description = "1-indexed line number to start reading from (default: 1)")]
+    offset: Option<u32>,
+    #[schemars(description = "Maximum number of lines to return (default: all)")]
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct EditFileParams {
-    #[schemars(description = "Absolute path to the file to write")]
+struct WriteFileParams {
+    #[schemars(description = "Absolute path to the file to create or overwrite")]
     path: String,
-    #[schemars(description = "New content to write (replaces existing content)")]
+    #[schemars(description = "Content to write (replaces existing content)")]
     content: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct EditFileParams {
+    #[schemars(description = "Absolute path to the file to edit")]
+    path: String,
+    #[schemars(description = "Exact text to find — must appear exactly once in the file")]
+    old_string: String,
+    #[schemars(description = "Replacement text")]
+    new_string: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct GlobParams {
+    #[schemars(description = "Glob pattern, e.g. \"**/*.rs\" or \"src/*.toml\"")]
+    pattern: String,
+    #[schemars(description = "Base directory to search from (default: sandbox work_dir)")]
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct GrepParams {
+    #[schemars(description = "Regex pattern to search for")]
+    pattern: String,
+    #[schemars(description = "File or directory to search (default: sandbox work_dir)")]
+    path: Option<String>,
+    #[schemars(description = "Glob pattern to filter filenames, e.g. \"*.rs\"")]
+    include: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RunCommandParams {
-    #[schemars(description = "Absolute path to the directory to run the command in")]
-    dir: String,
     #[schemars(description = "Shell command to execute (runs via sh -c)")]
     command: String,
+    #[schemars(description = "Directory to run the command in (default: sandbox work_dir)")]
+    dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -253,24 +287,44 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Read a file from a cloned repository")]
+    #[tool(description = "Read a file from the sandbox. Optionally specify offset (1-indexed start line) and limit (max lines) to read a range; line numbers are prefixed when a range is requested.")]
     async fn read_file(
         &self,
-        Parameters(ReadFileParams { path }): Parameters<ReadFileParams>,
+        Parameters(ReadFileParams { path, offset, limit }): Parameters<ReadFileParams>,
     ) -> String {
         if self.get_sandbox().is_none() {
             return "Error: no sandbox active. Call create_sandbox first.".to_string();
         }
-        match tokio::fs::read_to_string(&path).await {
-            Ok(content) => content,
-            Err(e) => format!("Error reading {path}: {e}"),
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) => return format!("Error reading {path}: {e}"),
+        };
+
+        if offset.is_none() && limit.is_none() {
+            return content;
         }
+
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+        let start = (offset.unwrap_or(1).saturating_sub(1)) as usize;
+        let start = start.min(total);
+        let end = match limit {
+            Some(n) => (start + n as usize).min(total),
+            None => total,
+        };
+
+        lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("{:>6}\t{line}", start + i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
-    #[tool(description = "Write/replace the content of a file in a cloned repository")]
-    async fn edit_file(
+    #[tool(description = "Create or overwrite a file with the given content. Parent directories are created automatically.")]
+    async fn write_file(
         &self,
-        Parameters(EditFileParams { path, content }): Parameters<EditFileParams>,
+        Parameters(WriteFileParams { path, content }): Parameters<WriteFileParams>,
     ) -> String {
         if self.get_sandbox().is_none() {
             return "Error: no sandbox active. Call create_sandbox first.".to_string();
@@ -287,18 +341,141 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Run a shell command inside a directory within the active sandbox")]
-    async fn run_command(
+    #[tool(description = "Edit a file by replacing an exact string. old_string must appear exactly once in the file; use more context if it matches multiple times.")]
+    async fn edit_file(
         &self,
-        Parameters(RunCommandParams { dir, command }): Parameters<RunCommandParams>,
+        Parameters(EditFileParams { path, old_string, new_string }): Parameters<EditFileParams>,
     ) -> String {
         if self.get_sandbox().is_none() {
             return "Error: no sandbox active. Call create_sandbox first.".to_string();
         }
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) => return format!("Error reading {path}: {e}"),
+        };
+        let count = content.matches(old_string.as_str()).count();
+        match count {
+            0 => format!("Error: old_string not found in {path}"),
+            1 => {
+                let new_content = content.replacen(old_string.as_str(), new_string.as_str(), 1);
+                match tokio::fs::write(&path, &new_content).await {
+                    Ok(()) => format!("Edited {path}: replaced 1 occurrence"),
+                    Err(e) => format!("Error writing {path}: {e}"),
+                }
+            }
+            n => format!("Error: old_string matches {n} times in {path} — make it more specific"),
+        }
+    }
+
+    #[tool(description = "Find files matching a glob pattern. Returns a JSON array of matching paths. Use ** for recursive matching, e.g. \"**/*.rs\".")]
+    async fn glob(
+        &self,
+        Parameters(GlobParams { pattern, path }): Parameters<GlobParams>,
+    ) -> String {
+        let sandbox = match self.get_sandbox() {
+            Some(s) => s,
+            None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
+        };
+        let base = path.unwrap_or_else(|| sandbox.work_dir.display().to_string());
+        let full_pattern = format!("{base}/{pattern}");
+
+        let entries = match ::glob::glob(&full_pattern) {
+            Ok(paths) => paths,
+            Err(e) => return format!("Error: invalid glob pattern: {e}"),
+        };
+
+        let mut matches: Vec<String> = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(p) => {
+                    matches.push(p.display().to_string());
+                    if matches.len() >= 1000 {
+                        matches.push("... (truncated at 1000 results)".to_string());
+                        break;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        serde_json::to_string(&matches).unwrap_or_default()
+    }
+
+    #[tool(description = "Search file contents using a regex pattern. Returns matching lines as \"path:line_num:content\". Optionally filter files by name pattern (include), e.g. \"*.rs\".")]
+    async fn grep(
+        &self,
+        Parameters(GrepParams { pattern, path, include }): Parameters<GrepParams>,
+    ) -> String {
+        let sandbox = match self.get_sandbox() {
+            Some(s) => s,
+            None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
+        };
+
+        let re = match Regex::new(&pattern) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: invalid regex pattern: {e}"),
+        };
+
+        let search_path = path.unwrap_or_else(|| sandbox.work_dir.display().to_string());
+        let search_path = std::path::Path::new(&search_path);
+
+        let files: Vec<std::path::PathBuf> = if search_path.is_file() {
+            vec![search_path.to_path_buf()]
+        } else {
+            WalkDir::new(search_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| {
+                    if let Some(ref inc) = include {
+                        let filename = e.file_name().to_string_lossy();
+                        ::glob::Pattern::new(inc)
+                            .map(|p| p.matches(&filename))
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    }
+                })
+                .map(|e| e.into_path())
+                .collect()
+        };
+
+        let mut results: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        'outer: for file in &files {
+            let content = match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for (line_num, line) in content.lines().enumerate() {
+                if re.is_match(line) {
+                    total += 1;
+                    if results.len() < 100 {
+                        results.push(format!("{}:{}:{}", file.display(), line_num + 1, line));
+                    } else {
+                        results.push(format!("... (truncated, {total}+ matches total)"));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        results.join("\n")
+    }
+
+    #[tool(description = "Run a shell command in the sandbox. dir defaults to the sandbox work directory if not specified.")]
+    async fn run_command(
+        &self,
+        Parameters(RunCommandParams { command, dir }): Parameters<RunCommandParams>,
+    ) -> String {
+        let sandbox = match self.get_sandbox() {
+            Some(s) => s,
+            None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
+        };
+        let work_dir = dir.unwrap_or_else(|| sandbox.work_dir.display().to_string());
         match Command::new("sh")
             .arg("-c")
             .arg(&command)
-            .current_dir(&dir)
+            .current_dir(&work_dir)
             .output()
             .await
         {
@@ -333,7 +510,6 @@ impl SandcastleHandler {
         };
         let repo_dir = sandbox.work_dir.join(&repo);
 
-        // Configure git identity
         for args in &[
             vec!["config", "user.email", "sandcastle@localhost"],
             vec!["config", "user.name", "sandcastle"],
@@ -345,7 +521,6 @@ impl SandcastleHandler {
                 .await;
         }
 
-        // Create and checkout branch
         let checkout = Command::new("git")
             .args(["checkout", "-b", &branch])
             .current_dir(&repo_dir)
@@ -355,7 +530,6 @@ impl SandcastleHandler {
             return format!("Failed to create branch: {e}");
         }
 
-        // Stage all changes
         let add = Command::new("git")
             .args(["add", "-A"])
             .current_dir(&repo_dir)
@@ -367,7 +541,6 @@ impl SandcastleHandler {
             return format!("git add failed: {}", String::from_utf8_lossy(&o.stderr));
         }
 
-        // Commit
         match Command::new("git")
             .args(["commit", "-m", &commit_message])
             .current_dir(&repo_dir)
@@ -384,7 +557,6 @@ impl SandcastleHandler {
             _ => {}
         }
 
-        // Push
         match Command::new("git")
             .args(["push", "origin", &branch])
             .current_dir(&repo_dir)
@@ -401,14 +573,12 @@ impl SandcastleHandler {
             _ => {}
         }
 
-        // Parse owner/repo
         let parts: Vec<&str> = repo.splitn(2, '/').collect();
         if parts.len() != 2 {
             return format!("Invalid repo format (expected owner/repo): {repo}");
         }
         let (owner, repo_name) = (parts[0], parts[1]);
 
-        // Open PR via GitHub API
         match self
             .octocrab
             .pulls(owner, repo_name)
@@ -434,11 +604,18 @@ impl ServerHandler for SandcastleHandler {
             .with_instructions(
                 "Sandcastle MCP server. \
                 IMPORTANT: All file operations, git commands, and shell commands MUST be performed \
-                using the tools provided by this server (clone_repository, read_file, edit_file, \
-                run_command, create_pr). Do NOT use your own built-in tools or shell access for \
-                any of these tasks — always delegate to the sandbox tools. \
+                using the tools provided by this server (clone_repository, read_file, write_file, \
+                edit_file, glob, grep, run_command, create_pr). Do NOT use your own built-in tools \
+                or shell access for any of these tasks — always delegate to the sandbox tools. \
                 Workflow: call create_sandbox first, then use the sandbox tools for everything else. \
-                list_repositories and list_providers are available before creating a sandbox."
+                list_repositories and list_providers are available before creating a sandbox. \
+                \n\nTool reference:\
+                \n- read_file(path, offset?, limit?): read a file; offset/limit for line ranges with line numbers\
+                \n- write_file(path, content): create or overwrite a file\
+                \n- edit_file(path, old_string, new_string): targeted search-replace within a file\
+                \n- glob(pattern, path?): find files matching a glob pattern (e.g. **/*.rs)\
+                \n- grep(pattern, path?, include?): search file contents with regex\
+                \n- run_command(command, dir?): run a shell command (dir defaults to sandbox root)"
                     .to_string(),
             )
     }
