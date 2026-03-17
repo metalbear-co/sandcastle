@@ -18,9 +18,3 @@ pub trait Provider: Send + Sync {
     async fn resume(&self, id: &str) -> Result<Sandbox, String>;
 }
 
-pub const ROOT_TOOLS: &[&str] = &[
-    "list_providers",
-    "list_repositories",
-    "create_sandbox",
-    "resume_sandbox",
-];

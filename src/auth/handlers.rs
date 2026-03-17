@@ -7,7 +7,7 @@ use axum::{
 use serde::Deserialize;
 use tracing::debug;
 
-use super::{generate_token, PendingCode, SharedAuthState};
+use super::{generate_token, persist_tokens, PendingCode, SharedAuthState};
 
 // ── Parameter types ───────────────────────────────────────────────────────────
 
@@ -204,7 +204,11 @@ pub async fn token_endpoint(
         }
         Some(c) => {
             let token = generate_token();
-            auth.valid_tokens.write().unwrap().insert(token.clone(), c.client_id.clone());
+            {
+                let mut tokens = auth.valid_tokens.write().unwrap();
+                tokens.insert(token.clone(), c.client_id.clone());
+                persist_tokens(&tokens);
+            }
             debug!("token: issued {token:.8}... for client {:.8}...", c.client_id);
             (StatusCode::OK, Json(serde_json::json!({
                 "access_token": token,

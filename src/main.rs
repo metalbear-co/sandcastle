@@ -1,4 +1,5 @@
 mod auth;
+mod github_auth;
 mod handler;
 mod sandbox_providers;
 
@@ -16,7 +17,7 @@ use rmcp::transport::streamable_http_server::{
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
-use auth::{AuthState, SharedAuthState};
+use auth::{load_persisted_tokens, AuthState, SharedAuthState};
 use auth::handlers::{
     authorize_approve, authorize_page, oauth_authorization_server,
     oauth_protected_resource, register_client, token_endpoint,
@@ -44,11 +45,14 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| format!("http://localhost:{port}"));
 
     let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
-    let password = std::env::var("SANDCASTLE_PASSWORD").ok();
+
+    let (octocrab, creds) = github_auth::load_github_creds()?;
+    let creds = Arc::new(creds);
+    let password = github_auth::load_sandcastle_password()?;
 
     let auth_state: SharedAuthState = Arc::new(AuthState {
         pending_codes: RwLock::new(HashMap::new()),
-        valid_tokens: RwLock::new(HashMap::new()),
+        valid_tokens: RwLock::new(load_persisted_tokens()),
         base_url: base_url.clone(),
         no_auth,
         password,
@@ -76,7 +80,7 @@ async fn main() -> Result<()> {
     let providers: Vec<Arc<dyn Provider>> = vec![local];
 
     let service = StreamableHttpService::new(
-        move || Ok(SandcastleHandler::new(providers.clone())),
+        move || Ok(SandcastleHandler::new(octocrab.clone(), creds.clone(), providers.clone())),
         LocalSessionManager::default().into(),
         Default::default(),
     );
@@ -98,6 +102,7 @@ async fn main() -> Result<()> {
 
     let addr = format!("0.0.0.0:{port}");
     info!("sandcastle listening on {addr}");
+    info!("MCP endpoint: {base_url}/");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

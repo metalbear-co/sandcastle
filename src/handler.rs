@@ -1,7 +1,7 @@
 use std::{path::Path, sync::{Arc, RwLock}};
 
 use anyhow::Result;
-use octocrab::Octocrab;
+use octocrab::{models::InstallationId, Octocrab};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -13,15 +13,8 @@ use rmcp::{
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::sandbox_providers::{Provider, Sandbox, ROOT_TOOLS};
-
-fn github_token() -> String {
-    std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set")
-}
-
-fn github_user() -> String {
-    std::env::var("GITHUB_USER").expect("GITHUB_USER must be set")
-}
+use crate::github_auth::GitHubCreds;
+use crate::sandbox_providers::{Provider, Sandbox};
 
 // ── Parameter types ───────────────────────────────────────────────────────────
 
@@ -35,6 +28,14 @@ struct CreateSandboxParams {
 struct ResumeSandboxParams {
     #[schemars(description = "Sandbox ID returned by create_sandbox")]
     id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListRepositoriesParams {
+    #[schemars(description = "Page number (1-based, default 1)")]
+    page: Option<u32>,
+    #[schemars(description = "Filter repos by name substring (case-insensitive)")]
+    query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -85,23 +86,22 @@ struct CreatePrParams {
 pub struct SandcastleHandler {
     tool_router: ToolRouter<Self>,
     octocrab: Arc<Octocrab>,
+    creds: Arc<GitHubCreds>,
     sandbox: Arc<RwLock<Option<Sandbox>>>,
     providers: Vec<Arc<dyn Provider>>,
 }
 
 #[tool_router]
 impl SandcastleHandler {
-    pub fn new(providers: Vec<Arc<dyn Provider>>) -> Self {
-        let token = github_token();
-        let octocrab = Arc::new(
-            Octocrab::builder()
-                .personal_token(token)
-                .build()
-                .expect("Failed to build Octocrab client"),
-        );
+    pub fn new(
+        octocrab: Arc<Octocrab>,
+        creds: Arc<GitHubCreds>,
+        providers: Vec<Arc<dyn Provider>>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             octocrab,
+            creds,
             sandbox: Arc::new(RwLock::new(None)),
             providers,
         }
@@ -162,22 +162,40 @@ impl SandcastleHandler {
         format!("Sandbox {id} not found or has expired")
     }
 
-    #[tool(description = "List GitHub repositories accessible with the configured token")]
-    async fn list_repositories(&self) -> String {
+    #[tool(description = "List GitHub repositories accessible with the configured token, sorted by most recently pushed. Returns up to 100 per page. If has_more is true, call again with page+1.")]
+    async fn list_repositories(
+        &self,
+        Parameters(ListRepositoriesParams { page, query }): Parameters<ListRepositoriesParams>,
+    ) -> String {
+        let page_num = page.unwrap_or(1);
         match self
             .octocrab
             .current()
             .list_repos_for_authenticated_user()
+            .sort("pushed")
+            .direction("desc")
+            .per_page(100)
+            .page(page_num as u8)
             .send()
             .await
         {
-            Ok(page) => {
-                let repos: Vec<String> = page
+            Ok(result) => {
+                let has_more = result.next.is_some();
+                let mut repos: Vec<String> = result
                     .items
                     .iter()
                     .map(|r| r.full_name.clone().unwrap_or_default())
                     .collect();
-                serde_json::to_string(&repos).unwrap_or_else(|e| e.to_string())
+                if let Some(q) = &query {
+                    let q = q.to_lowercase();
+                    repos.retain(|name| name.to_lowercase().contains(&q));
+                }
+                serde_json::to_string(&serde_json::json!({
+                    "repos": repos,
+                    "page": page_num,
+                    "has_more": has_more,
+                }))
+                .unwrap_or_else(|e| e.to_string())
             }
             Err(e) => format!("Error listing repositories: {e}"),
         }
@@ -192,8 +210,6 @@ impl SandcastleHandler {
             Some(s) => s,
             None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
         };
-        let token = github_token();
-        let user = github_user();
         let dest = sandbox.work_dir.join(&repo);
 
         if dest.exists() {
@@ -206,7 +222,26 @@ impl SandcastleHandler {
             return format!("Failed to create directory: {e}");
         }
 
-        let url = format!("https://{user}:{token}@github.com/{repo}.git");
+        let url = match self.creds.as_ref() {
+            GitHubCreds::PersonalToken { token, user } => {
+                format!("https://{user}:{token}@github.com/{repo}.git")
+            }
+            GitHubCreds::App { app_octocrab, installation_id } => {
+                match app_octocrab
+                    .installation_and_token(InstallationId(*installation_id))
+                    .await
+                {
+                    Ok((_, token)) => {
+                        use secrecy::ExposeSecret;
+                        format!(
+                            "https://x-access-token:{}@github.com/{repo}.git",
+                            token.expose_secret()
+                        )
+                    }
+                    Err(e) => return format!("Error getting installation token: {e}"),
+                }
+            }
+        };
         match Command::new("git")
             .args(["clone", &url, dest.to_str().unwrap()])
             .output()
@@ -398,9 +433,12 @@ impl ServerHandler for SandcastleHandler {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
                 "Sandcastle MCP server. \
-                Call list_providers to see available sandbox providers, \
-                then create_sandbox to start a session. \
-                list_repositories is available without a sandbox."
+                IMPORTANT: All file operations, git commands, and shell commands MUST be performed \
+                using the tools provided by this server (clone_repository, read_file, edit_file, \
+                run_command, create_pr). Do NOT use your own built-in tools or shell access for \
+                any of these tasks — always delegate to the sandbox tools. \
+                Workflow: call create_sandbox first, then use the sandbox tools for everything else. \
+                list_repositories and list_providers are available before creating a sandbox."
                     .to_string(),
             )
     }
@@ -410,18 +448,10 @@ impl ServerHandler for SandcastleHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let mut tools = self.tool_router.list_all();
-        if self.get_sandbox().is_none() {
-            tools.retain(|t| ROOT_TOOLS.contains(&t.name.as_ref()));
-        }
+        let tools = self.tool_router.list_all();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        tracing::info!(tools = ?names, "list_tools");
         Ok(ListToolsResult { tools, meta: None, next_cursor: None })
-    }
-
-    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
-        if self.get_sandbox().is_none() && !ROOT_TOOLS.contains(&name) {
-            return None;
-        }
-        self.tool_router.get(name).cloned()
     }
 
     async fn call_tool(
