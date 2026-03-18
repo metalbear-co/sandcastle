@@ -16,7 +16,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::github_auth::GitHubCreds;
-use crate::sandbox_providers::{Provider, Sandbox};
+use crate::sandbox_providers::{Provider, SandboxHandle};
 
 // ── Parameter types ───────────────────────────────────────────────────────────
 
@@ -24,6 +24,10 @@ use crate::sandbox_providers::{Provider, Sandbox};
 struct CreateSandboxParams {
     #[schemars(description = "Provider name, e.g. \"local\"")]
     provider: String,
+    #[schemars(
+        description = "A short descriptive name for this sandbox session, e.g. \"fix-auth-bug\" or \"add-dark-mode\". Choose something meaningful to the current task, or ask the user if nothing obvious applies."
+    )]
+    name: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -121,7 +125,7 @@ pub struct SandcastleHandler {
     tool_router: ToolRouter<Self>,
     octocrab: Arc<Octocrab>,
     creds: Arc<GitHubCreds>,
-    sandbox: Arc<RwLock<Option<Arc<dyn Sandbox>>>>,
+    sandbox: Arc<RwLock<Option<SandboxHandle>>>,
     providers: Vec<Arc<dyn Provider>>,
 }
 
@@ -141,7 +145,7 @@ impl SandcastleHandler {
         }
     }
 
-    fn get_sandbox(&self) -> Option<Arc<dyn Sandbox>> {
+    fn get_sandbox(&self) -> Option<SandboxHandle> {
         self.sandbox.read().unwrap().clone()
     }
 
@@ -160,7 +164,7 @@ impl SandcastleHandler {
     )]
     async fn create_sandbox(
         &self,
-        Parameters(CreateSandboxParams { provider }): Parameters<CreateSandboxParams>,
+        Parameters(CreateSandboxParams { provider, name }): Parameters<CreateSandboxParams>,
     ) -> String {
         let p = self.providers.iter().find(|p| p.name() == provider);
         match p {
@@ -171,13 +175,14 @@ impl SandcastleHandler {
                     names.join(", ")
                 )
             }
-            Some(p) => match p.create().await {
+            Some(p) => match p.create(name).await {
                 Err(e) => e,
-                Ok(sandbox) => {
-                    let id = sandbox.id().to_string();
-                    let path = sandbox.work_dir().display().to_string();
-                    *self.sandbox.write().unwrap() = Some(sandbox);
-                    format!("Sandbox created at {path} (id: {id})")
+                Ok(handle) => {
+                    let id = handle.id.clone();
+                    let name = handle.name.clone();
+                    let path = handle.work_dir.display().to_string();
+                    *self.sandbox.write().unwrap() = Some(handle);
+                    format!("Sandbox \"{name}\" created at {path} (id: {id})")
                 }
             },
         }
@@ -192,10 +197,11 @@ impl SandcastleHandler {
     ) -> String {
         for p in &self.providers {
             match p.resume(&id).await {
-                Ok(sandbox) => {
-                    let path = sandbox.work_dir().display().to_string();
-                    *self.sandbox.write().unwrap() = Some(sandbox);
-                    return format!("Resumed sandbox {id} at {path}");
+                Ok(handle) => {
+                    let path = handle.work_dir.display().to_string();
+                    let name = handle.name.clone();
+                    *self.sandbox.write().unwrap() = Some(handle);
+                    return format!("Resumed sandbox \"{name}\" ({id}) at {path}");
                 }
                 Err(_) => continue,
             }
@@ -442,6 +448,7 @@ impl ServerHandler for SandcastleHandler {
                 files — when asked to write or read a plan file, write it to a path inside the \
                 sandbox (e.g. <sandbox_work_dir>/plan.md) and read it back from there.\
                 \n\nTool reference:\
+                \n- create_sandbox(provider, name): create a sandbox; when calling, choose a short descriptive name that reflects the current task (e.g. \"fix-login-bug\", \"add-export-feature\"). If no obvious name exists, ask the user before proceeding.\
                 \n- read_file(path, offset?, limit?): read a file within the sandbox; offset/limit for line ranges with line numbers\
                 \n- write_file(path, content): create or overwrite a file within the sandbox\
                 \n- edit_file(path, old_string, new_string): targeted search-replace within a sandbox file\

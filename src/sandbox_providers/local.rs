@@ -7,12 +7,12 @@ use std::{
 
 use regex::Regex;
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use walkdir::WalkDir;
 
 use crate::auth::generate_token;
 
-use super::{Provider, Sandbox};
+use super::{Provider, SandboxHandle, SandboxMessage};
 
 // ── LocalSandbox ──────────────────────────────────────────────────────────────
 
@@ -23,8 +23,15 @@ pub struct LocalSandbox {
 
 impl LocalSandbox {
     fn ensure_in_sandbox(&self, path: &str) -> Result<(), String> {
-        let p = Path::new(path);
-        if !p.starts_with(&self.work_dir) {
+        // Canonicalize work_dir (it always exists) to resolve any symlinks in the
+        // sandbox root itself, then lexically normalize the target path to collapse
+        // `.` and `..` without requiring it to exist on disk.
+        let canonical_root =
+            std::fs::canonicalize(&self.work_dir).unwrap_or_else(|_| self.work_dir.clone());
+
+        let normalized = lexical_normalize(Path::new(path));
+
+        if !normalized.starts_with(&canonical_root) {
             return Err(format!(
                 "Error: path {path} is outside the sandbox ({}). \
                  File operations are restricted to the sandbox directory.",
@@ -32,17 +39,6 @@ impl LocalSandbox {
             ));
         }
         Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl Sandbox for LocalSandbox {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn work_dir(&self) -> &Path {
-        &self.work_dir
     }
 
     #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
@@ -176,7 +172,7 @@ impl Sandbox for LocalSandbox {
         let mut results: Vec<String> = Vec::new();
         let mut total = 0usize;
         'outer: for file in &files {
-            let content = match std::fs::read_to_string(file) {
+            let content = match tokio::fs::read_to_string(file).await {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -199,6 +195,9 @@ impl Sandbox for LocalSandbox {
     #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
     async fn run_command(&self, command: &str, dir: Option<String>) -> String {
         let work_dir = dir.unwrap_or_else(|| self.work_dir.display().to_string());
+        if let Err(e) = self.ensure_in_sandbox(&work_dir) {
+            return e;
+        }
         match Command::new("sh")
             .arg("-c")
             .arg(command)
@@ -306,12 +305,97 @@ impl Sandbox for LocalSandbox {
 
         "ok".to_string()
     }
+
+    pub async fn run(self, mut rx: mpsc::Receiver<SandboxMessage>) {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                SandboxMessage::ReadFile {
+                    path,
+                    offset,
+                    limit,
+                    reply,
+                } => {
+                    let _ = reply.send(self.read_file(&path, offset, limit).await);
+                }
+                SandboxMessage::WriteFile {
+                    path,
+                    content,
+                    reply,
+                } => {
+                    let _ = reply.send(self.write_file(&path, &content).await);
+                }
+                SandboxMessage::EditFile {
+                    path,
+                    old_string,
+                    new_string,
+                    reply,
+                } => {
+                    let _ = reply.send(self.edit_file(&path, &old_string, &new_string).await);
+                }
+                SandboxMessage::Glob {
+                    pattern,
+                    base_path,
+                    reply,
+                } => {
+                    let _ = reply.send(self.glob(&pattern, base_path).await);
+                }
+                SandboxMessage::Grep {
+                    pattern,
+                    path,
+                    include,
+                    reply,
+                } => {
+                    let _ = reply.send(self.grep(&pattern, path, include).await);
+                }
+                SandboxMessage::RunCommand {
+                    command,
+                    dir,
+                    reply,
+                } => {
+                    let _ = reply.send(self.run_command(&command, dir).await);
+                }
+                SandboxMessage::CloneRepository { repo, url, reply } => {
+                    let _ = reply.send(self.clone_repository(&repo, &url).await);
+                }
+                SandboxMessage::GitCommitAndPush {
+                    repo,
+                    branch,
+                    commit_message,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        self.git_commit_and_push(&repo, &branch, &commit_message)
+                            .await,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Resolve `.` and `..` components lexically (no I/O) so that paths like
+/// `/sandbox/foo/../../etc/passwd` are caught before reaching the filesystem.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out: Vec<std::path::Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // Only pop a normal component; preserve leading RootDir/Prefix.
+                if matches!(out.last(), Some(std::path::Component::Normal(_))) {
+                    out.pop();
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.iter().collect()
 }
 
 // ── LocalProvider ─────────────────────────────────────────────────────────────
 
 struct SandboxRecord {
-    work_dir: PathBuf,
+    handle: SandboxHandle,
     created_at: Instant,
 }
 
@@ -338,7 +422,7 @@ impl LocalProvider {
                     let map = provider.sandboxes.read().await;
                     map.iter()
                         .filter(|(_, r)| r.created_at.elapsed() >= provider.ttl)
-                        .map(|(id, r)| (id.clone(), r.work_dir.clone()))
+                        .map(|(id, r)| (id.clone(), r.handle.work_dir.clone()))
                         .collect()
                 };
                 for (id, work_dir) in expired {
@@ -361,33 +445,39 @@ impl Provider for LocalProvider {
         "Local filesystem sandbox — files live on this server"
     }
 
-    async fn create(&self) -> Result<Arc<dyn Sandbox>, String> {
+    async fn create(&self, name: String) -> Result<SandboxHandle, String> {
         let id = generate_token()[..16].to_string();
         let work_dir = PathBuf::from(format!("/tmp/sandcastle/sessions/{id}"));
         tokio::fs::create_dir_all(&work_dir)
             .await
             .map_err(|e| format!("Failed to create sandbox: {e}"))?;
+        let (tx, rx) = mpsc::channel(32);
+        let handle = SandboxHandle::new(id.clone(), name, work_dir.clone(), tx);
+        tokio::spawn(
+            LocalSandbox {
+                id: id.clone(),
+                work_dir,
+            }
+            .run(rx),
+        );
         self.sandboxes.write().await.insert(
-            id.clone(),
+            id,
             SandboxRecord {
-                work_dir: work_dir.clone(),
+                handle: handle.clone(),
                 created_at: Instant::now(),
             },
         );
-        Ok(Arc::new(LocalSandbox { id, work_dir }))
+        Ok(handle)
     }
 
-    async fn resume(&self, id: &str) -> Result<Arc<dyn Sandbox>, String> {
+    async fn resume(&self, id: &str) -> Result<SandboxHandle, String> {
         let map = self.sandboxes.read().await;
         match map.get(id) {
             None => Err(format!("Sandbox {id} not found")),
             Some(r) if r.created_at.elapsed() >= self.ttl => {
                 Err(format!("Sandbox {id} has expired"))
             }
-            Some(r) => Ok(Arc::new(LocalSandbox {
-                id: id.to_string(),
-                work_dir: r.work_dir.clone(),
-            })),
+            Some(r) => Ok(r.handle.clone()),
         }
     }
 }

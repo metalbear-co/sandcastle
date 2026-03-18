@@ -30,6 +30,28 @@ Because the agent is just an MCP client, it can run anywhere that supports MCP �
       └─────────────────────┘
 ```
 
+## Quick Start
+
+### 1. Install
+
+```bash
+cargo install --path .
+```
+
+This builds and installs the `sandcastle` binary to your Cargo bin directory (usually `~/.cargo/bin`).
+
+### 2. Run and follow the setup wizard
+
+```bash
+sandcastle
+```
+
+The wizard will walk you through configuration and connecting your agent.
+
+> **Tip:** MCP clients like Claude.ai need to reach Sandcastle over HTTPS. Use [ngrok](https://ngrok.com) to get a public URL — when the wizard asks for a base URL, use the one ngrok provides (e.g. `https://abc123.ngrok-free.app`).
+
+---
+
 ## Current Implementation: GitHub Sandbox
 
 The current sandbox provider uses GitHub as the execution environment — clone a repo, make changes, run commands, and open a PR.
