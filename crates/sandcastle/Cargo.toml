@@ -1,0 +1,26 @@
+[package]
+name = "sandcastle"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+sandcastle-util = { path = "../util" }
+sandcastle-keychain = { path = "../keychain" }
+sandcastle-auth = { path = "../auth" }
+sandcastle-sandbox-providers = { path = "../sandbox_providers" }
+rmcp = { version = "1.2.0", features = ["server", "macros", "transport-streamable-http-server"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+octocrab = "0.44"
+secrecy = "0.10"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

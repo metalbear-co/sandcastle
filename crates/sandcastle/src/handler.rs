@@ -15,8 +15,8 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use crate::github_auth::GitHubCreds;
-use crate::sandbox_providers::{Provider, SandboxHandle};
+use sandcastle_auth::github_auth::GitHubCreds;
+use sandcastle_sandbox_providers::{Provider, SandboxHandle};
 
 // ── Parameter types ───────────────────────────────────────────────────────────
 

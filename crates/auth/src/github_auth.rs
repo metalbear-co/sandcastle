@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -8,7 +8,8 @@ use octocrab::{
     models::{AppId, InstallationId},
 };
 
-use crate::keychain::{StoredConfig, load_config, save_config};
+use sandcastle_keychain::{StoredConfig, load_config, save_config};
+use sandcastle_util::prompt;
 
 pub enum GitHubCreds {
     PersonalToken {
@@ -186,18 +187,6 @@ fn load_from_keychain(config: &StoredConfig) -> Result<Option<(Arc<Octocrab>, Gi
         }
         other => anyhow::bail!("unknown auth_mode in config: {other}"),
     }
-}
-
-fn prompt(msg: &str) -> Result<String> {
-    eprint!("{msg}");
-    io::stderr().flush()?;
-    let mut line = String::new();
-    io::stdin().lock().read_line(&mut line)?;
-    Ok(line
-        .trim_end_matches('\n')
-        .trim_end_matches('\r')
-        .trim()
-        .to_string())
 }
 
 fn run_wizard() -> Result<(Arc<Octocrab>, GitHubCreds)> {

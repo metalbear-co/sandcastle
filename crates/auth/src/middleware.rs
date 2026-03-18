@@ -14,7 +14,7 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    use crate::auth::{AuthState, SharedAuthState};
+    use crate::{AuthState, SharedAuthState};
 
     fn make_auth(no_auth: bool, token: Option<&str>) -> SharedAuthState {
         let mut tokens = HashMap::new();

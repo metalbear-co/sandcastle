@@ -7,7 +7,9 @@ use axum::{
 use serde::Deserialize;
 use tracing::debug;
 
-use super::{PendingCode, SharedAuthState, generate_token, persist_tokens};
+use sandcastle_util::generate_token;
+
+use super::{PendingCode, SharedAuthState, persist_tokens};
 
 // ── Parameter types ───────────────────────────────────────────────────────────
 
@@ -274,7 +276,7 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    use crate::auth::{AuthState, SharedAuthState};
+    use crate::{AuthState, SharedAuthState};
 
     fn make_auth(password: Option<&str>) -> SharedAuthState {
         Arc::new(AuthState {

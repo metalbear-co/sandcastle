@@ -10,9 +10,9 @@ use tokio::process::Command;
 use tokio::sync::{RwLock, mpsc};
 use walkdir::WalkDir;
 
-use crate::auth::generate_token;
+use sandcastle_util::generate_token;
 
-use super::{Provider, SandboxHandle, SandboxMessage};
+use crate::{Provider, SandboxHandle, SandboxMessage};
 
 // ── LocalSandbox ──────────────────────────────────────────────────────────────
 

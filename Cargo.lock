@@ -1632,18 +1632,14 @@ name = "sandcastle"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
- "bollard",
- "daytona-client",
- "futures-util",
- "glob",
  "http-body-util",
- "jsonwebtoken",
- "keyring",
  "octocrab",
- "regex",
  "rmcp",
+ "sandcastle-auth",
+ "sandcastle-keychain",
+ "sandcastle-sandbox-providers",
+ "sandcastle-util",
  "secrecy",
  "serde",
  "serde_json",
@@ -1652,8 +1648,64 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "sandcastle-auth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "http-body-util",
+ "jsonwebtoken",
+ "octocrab",
+ "sandcastle-keychain",
+ "sandcastle-util",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "sandcastle-keychain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "keyring",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "sandcastle-sandbox-providers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bollard",
+ "daytona-client",
+ "futures-util",
+ "glob",
+ "regex",
+ "sandcastle-keychain",
+ "sandcastle-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "sandcastle-util"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

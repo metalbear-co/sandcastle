@@ -1,0 +1,22 @@
+[package]
+name = "sandcastle-auth"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+sandcastle-util = { path = "../util" }
+sandcastle-keychain = { path = "../keychain" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+octocrab = "0.44"
+jsonwebtoken = "9"
+secrecy = "0.10"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -1,34 +1,10 @@
 [workspace]
-members = ["xtask"]
-
-[package]
-name = "sandcastle"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-rmcp = { version = "1.2.0", features = ["server", "macros", "transport-streamable-http-server"] }
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-octocrab = "0.44"
-anyhow = "1"
-axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-async-trait = "0.1"
-jsonwebtoken = "9"
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
-secrecy = "0.10"
-glob = "0.3"
-regex = "1"
-walkdir = "2"
-bollard = "0.18"
-futures-util = "0.3"
-daytona-client = "0.5.0"
-uuid = "1"
-
-[dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
+members = [
+    "crates/sandcastle",
+    "crates/util",
+    "crates/keychain",
+    "crates/auth",
+    "crates/sandbox_providers",
+    "tooling/xtask",
+]
+resolver = "3"

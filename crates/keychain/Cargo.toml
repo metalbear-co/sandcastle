@@ -1,0 +1,12 @@
+[package]
+name = "sandcastle-keychain"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"

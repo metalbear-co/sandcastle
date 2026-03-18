@@ -1,4 +1,5 @@
 pub mod daytona;
+pub mod daytona_auth;
 pub mod docker;
 pub mod local;
 

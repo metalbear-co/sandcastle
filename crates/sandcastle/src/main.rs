@@ -1,10 +1,5 @@
-mod auth;
 mod config;
-mod daytona_auth;
-mod github_auth;
 mod handler;
-mod keychain;
-mod sandbox_providers;
 
 use std::{
     collections::HashMap,
@@ -23,16 +18,17 @@ use rmcp::transport::streamable_http_server::{
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
-use auth::handlers::{
+use sandcastle_auth::handlers::{
     authorize_approve, authorize_page, oauth_authorization_server, oauth_protected_resource,
     register_client, token_endpoint,
 };
-use auth::middleware::require_auth;
-use auth::{AuthState, SharedAuthState, load_persisted_tokens};
-use handler::SandcastleHandler;
-use sandbox_providers::{
+use sandcastle_auth::middleware::require_auth;
+use sandcastle_auth::{AuthState, SharedAuthState, load_persisted_tokens};
+use sandcastle_sandbox_providers::{
     Provider, daytona::DaytonaProvider, docker::DockerProvider, local::LocalProvider,
 };
+
+use handler::SandcastleHandler;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -53,11 +49,11 @@ async fn main() -> Result<()> {
 
     let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
 
-    let stored_config = keychain::load_config();
+    let stored_config = sandcastle_keychain::load_config();
 
-    let (octocrab, creds) = github_auth::load_github_creds(&stored_config)?;
+    let (octocrab, creds) = sandcastle_auth::github_auth::load_github_creds(&stored_config)?;
     let creds = Arc::new(creds);
-    let password = github_auth::load_sandcastle_password(&stored_config)?;
+    let password = sandcastle_auth::github_auth::load_sandcastle_password(&stored_config)?;
 
     let auth_state: SharedAuthState = Arc::new(AuthState {
         pending_codes: RwLock::new(HashMap::new()),
@@ -107,7 +103,7 @@ async fn main() -> Result<()> {
     }
 
     if enabled.contains(&"daytona".to_string()) {
-        match daytona_auth::load_daytona_creds(&stored_config) {
+        match sandcastle_sandbox_providers::daytona_auth::load_daytona_creds(&stored_config) {
             Ok(creds) => {
                 match DaytonaProvider::new(
                     creds.api_key,
