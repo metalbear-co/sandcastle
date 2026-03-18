@@ -1,13 +1,16 @@
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::{Arc, RwLock}};
     use axum::{
+        Extension, Router,
         body::Body,
         http::{Request, StatusCode},
         middleware,
         response::IntoResponse,
         routing::get,
-        Extension, Router,
+    };
+    use std::{
+        collections::HashMap,
+        sync::{Arc, RwLock},
     };
     use tower::ServiceExt;
 

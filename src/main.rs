@@ -3,13 +3,16 @@ mod github_auth;
 mod handler;
 mod sandbox_providers;
 
-use std::{collections::HashMap, sync::{Arc, RwLock}, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use anyhow::Result;
 use axum::{
-    middleware,
+    Extension, Router, middleware,
     routing::{get, post},
-    Extension, Router,
 };
 use rmcp::transport::streamable_http_server::{
     StreamableHttpService, session::local::LocalSessionManager,
@@ -17,14 +20,14 @@ use rmcp::transport::streamable_http_server::{
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
-use auth::{load_persisted_tokens, AuthState, SharedAuthState};
 use auth::handlers::{
-    authorize_approve, authorize_page, oauth_authorization_server,
-    oauth_protected_resource, register_client, token_endpoint,
+    authorize_approve, authorize_page, oauth_authorization_server, oauth_protected_resource,
+    register_client, token_endpoint,
 };
 use auth::middleware::require_auth;
+use auth::{AuthState, SharedAuthState, load_persisted_tokens};
 use handler::SandcastleHandler;
-use sandbox_providers::{local::LocalProvider, Provider};
+use sandbox_providers::{Provider, local::LocalProvider};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,8 +44,7 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(3000);
 
-    let base_url = std::env::var("BASE_URL")
-        .unwrap_or_else(|_| format!("http://localhost:{port}"));
+    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
 
     let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
 
@@ -80,7 +82,13 @@ async fn main() -> Result<()> {
     let providers: Vec<Arc<dyn Provider>> = vec![local];
 
     let service = StreamableHttpService::new(
-        move || Ok(SandcastleHandler::new(octocrab.clone(), creds.clone(), providers.clone())),
+        move || {
+            Ok(SandcastleHandler::new(
+                octocrab.clone(),
+                creds.clone(),
+                providers.clone(),
+            ))
+        },
         LocalSessionManager::default().into(),
         Default::default(),
     );
@@ -90,8 +98,14 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route_service("/", service)
         .route_layer(middleware::from_fn(require_auth))
-        .route("/.well-known/oauth-protected-resource", get(oauth_protected_resource))
-        .route("/.well-known/oauth-authorization-server", get(oauth_authorization_server))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_authorization_server),
+        )
         .route("/authorize", get(authorize_page))
         .route("/authorize/approve", post(authorize_approve))
         .route("/token", post(token_endpoint))

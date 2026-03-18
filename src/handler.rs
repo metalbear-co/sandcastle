@@ -1,14 +1,17 @@
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
-use octocrab::{models::InstallationId, Octocrab};
+use octocrab::{Octocrab, models::InstallationId};
 use rmcp::{
-    ServerHandler,
+    ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
-    model::{CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams,
+        ServerCapabilities, ServerInfo,
+    },
+    schemars,
     service::RequestContext,
-    ErrorData, RoleServer,
-    schemars, tool, tool_router,
+    tool, tool_router,
 };
 use serde::Deserialize;
 
@@ -152,7 +155,9 @@ impl SandcastleHandler {
         serde_json::to_string(&list).unwrap_or_default()
     }
 
-    #[tool(description = "Spawn a sandbox with the given provider. Must be called before using any sandbox tools. Returns the sandbox ID which can be used later with resume_sandbox.")]
+    #[tool(
+        description = "Spawn a sandbox with the given provider. Must be called before using any sandbox tools. Returns the sandbox ID which can be used later with resume_sandbox."
+    )]
     async fn create_sandbox(
         &self,
         Parameters(CreateSandboxParams { provider }): Parameters<CreateSandboxParams>,
@@ -161,7 +166,10 @@ impl SandcastleHandler {
         match p {
             None => {
                 let names: Vec<&str> = self.providers.iter().map(|p| p.name()).collect();
-                format!("Unknown provider: {provider}. Available: {}", names.join(", "))
+                format!(
+                    "Unknown provider: {provider}. Available: {}",
+                    names.join(", ")
+                )
             }
             Some(p) => match p.create().await {
                 Err(e) => e,
@@ -175,7 +183,9 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Resume a previously created sandbox by ID. Use the ID returned by create_sandbox.")]
+    #[tool(
+        description = "Resume a previously created sandbox by ID. Use the ID returned by create_sandbox."
+    )]
     async fn resume_sandbox(
         &self,
         Parameters(ResumeSandboxParams { id }): Parameters<ResumeSandboxParams>,
@@ -193,7 +203,9 @@ impl SandcastleHandler {
         format!("Sandbox {id} not found or has expired")
     }
 
-    #[tool(description = "List GitHub repositories accessible with the configured token, sorted by most recently pushed. Returns up to 100 per page. If has_more is true, call again with page+1.")]
+    #[tool(
+        description = "List GitHub repositories accessible with the configured token, sorted by most recently pushed. Returns up to 100 per page. If has_more is true, call again with page+1."
+    )]
     async fn list_repositories(
         &self,
         Parameters(ListRepositoriesParams { page, query }): Parameters<ListRepositoriesParams>,
@@ -232,7 +244,9 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Clone a GitHub repository into the active sandbox. Returns the local path.")]
+    #[tool(
+        description = "Clone a GitHub repository into the active sandbox. Returns the local path."
+    )]
     async fn clone_repository(
         &self,
         Parameters(CloneRepoParams { repo }): Parameters<CloneRepoParams>,
@@ -246,7 +260,10 @@ impl SandcastleHandler {
             GitHubCreds::PersonalToken { token, user } => {
                 format!("https://{user}:{token}@github.com/{repo}.git")
             }
-            GitHubCreds::App { app_octocrab, installation_id } => {
+            GitHubCreds::App {
+                app_octocrab,
+                installation_id,
+            } => {
                 match app_octocrab
                     .installation_and_token(InstallationId(*installation_id))
                     .await
@@ -266,10 +283,16 @@ impl SandcastleHandler {
         sandbox.clone_repository(&repo, &auth_url).await
     }
 
-    #[tool(description = "Read a file from the sandbox. Optionally specify offset (1-indexed start line) and limit (max lines) to read a range; line numbers are prefixed when a range is requested.")]
+    #[tool(
+        description = "Read a file from the sandbox. Optionally specify offset (1-indexed start line) and limit (max lines) to read a range; line numbers are prefixed when a range is requested."
+    )]
     async fn read_file(
         &self,
-        Parameters(ReadFileParams { path, offset, limit }): Parameters<ReadFileParams>,
+        Parameters(ReadFileParams {
+            path,
+            offset,
+            limit,
+        }): Parameters<ReadFileParams>,
     ) -> String {
         match self.get_sandbox() {
             None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
@@ -277,7 +300,9 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Create or overwrite a file with the given content. Parent directories are created automatically.")]
+    #[tool(
+        description = "Create or overwrite a file with the given content. Parent directories are created automatically."
+    )]
     async fn write_file(
         &self,
         Parameters(WriteFileParams { path, content }): Parameters<WriteFileParams>,
@@ -288,10 +313,16 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Edit a file by replacing an exact string. old_string must appear exactly once in the file; use more context if it matches multiple times.")]
+    #[tool(
+        description = "Edit a file by replacing an exact string. old_string must appear exactly once in the file; use more context if it matches multiple times."
+    )]
     async fn edit_file(
         &self,
-        Parameters(EditFileParams { path, old_string, new_string }): Parameters<EditFileParams>,
+        Parameters(EditFileParams {
+            path,
+            old_string,
+            new_string,
+        }): Parameters<EditFileParams>,
     ) -> String {
         match self.get_sandbox() {
             None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
@@ -299,7 +330,9 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Find files matching a glob pattern. Returns a JSON array of matching paths. Use ** for recursive matching, e.g. \"**/*.rs\".")]
+    #[tool(
+        description = "Find files matching a glob pattern. Returns a JSON array of matching paths. Use ** for recursive matching, e.g. \"**/*.rs\"."
+    )]
     async fn glob(
         &self,
         Parameters(GlobParams { pattern, path }): Parameters<GlobParams>,
@@ -310,10 +343,16 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Search file contents using a regex pattern. Returns matching lines as \"path:line_num:content\". Optionally filter files by name pattern (include), e.g. \"*.rs\".")]
+    #[tool(
+        description = "Search file contents using a regex pattern. Returns matching lines as \"path:line_num:content\". Optionally filter files by name pattern (include), e.g. \"*.rs\"."
+    )]
     async fn grep(
         &self,
-        Parameters(GrepParams { pattern, path, include }): Parameters<GrepParams>,
+        Parameters(GrepParams {
+            pattern,
+            path,
+            include,
+        }): Parameters<GrepParams>,
     ) -> String {
         match self.get_sandbox() {
             None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
@@ -321,7 +360,9 @@ impl SandcastleHandler {
         }
     }
 
-    #[tool(description = "Run a shell command in the sandbox. dir defaults to the sandbox work directory if not specified.")]
+    #[tool(
+        description = "Run a shell command in the sandbox. dir defaults to the sandbox work directory if not specified."
+    )]
     async fn run_command(
         &self,
         Parameters(RunCommandParams { command, dir }): Parameters<RunCommandParams>,
@@ -351,7 +392,9 @@ impl SandcastleHandler {
         };
 
         // Git work → sandbox
-        let result = sandbox.git_commit_and_push(&repo, &branch, &commit_message).await;
+        let result = sandbox
+            .git_commit_and_push(&repo, &branch, &commit_message)
+            .await;
         if result != "ok" {
             return result;
         }
@@ -417,7 +460,11 @@ impl ServerHandler for SandcastleHandler {
         let tools = self.tool_router.list_all();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         tracing::info!(tools = ?names, "list_tools");
-        Ok(ListToolsResult { tools, meta: None, next_cursor: None })
+        Ok(ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
     }
 
     async fn call_tool(

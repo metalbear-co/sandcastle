@@ -13,7 +13,7 @@ pub trait Sandbox: Send + Sync {
     async fn glob(&self, pattern: &str, base_path: Option<String>) -> String;
     async fn grep(&self, pattern: &str, path: Option<String>, include: Option<String>) -> String;
     async fn run_command(&self, command: &str, dir: Option<String>) -> String;
-    async fn clone_repository(&self, repo: &str, auth_url: &str) -> String;
+    async fn clone_repository(&self, repo: &str, url: &str) -> String;
     async fn git_commit_and_push(&self, repo: &str, branch: &str, commit_message: &str) -> String;
 }
 

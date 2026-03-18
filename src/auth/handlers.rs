@@ -1,13 +1,13 @@
 use axum::{
+    Json,
     extract::{Extension, Form, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use tracing::debug;
 
-use super::{generate_token, persist_tokens, PendingCode, SharedAuthState};
+use super::{PendingCode, SharedAuthState, generate_token, persist_tokens};
 
 // ── Parameter types ───────────────────────────────────────────────────────────
 
@@ -55,7 +55,13 @@ pub struct TokenRequest {
 
 // ── HTML ──────────────────────────────────────────────────────────────────────
 
-pub fn approval_html(client_id: &str, redirect_uri: &str, state: &str, needs_password: bool, error: Option<&str>) -> String {
+pub fn approval_html(
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    needs_password: bool,
+    error: Option<&str>,
+) -> String {
     let password_field = if needs_password {
         r#"<input type="password" name="password" placeholder="Password" required
              style="display:block;width:100%;padding:8px 10px;margin-bottom:12px;
@@ -68,7 +74,8 @@ pub fn approval_html(client_id: &str, redirect_uri: &str, state: &str, needs_pas
     } else {
         String::new()
     };
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html>
 <head>
   <title>Sandcastle — MCP Access Request</title>
@@ -94,7 +101,8 @@ pub fn approval_html(client_id: &str, redirect_uri: &str, state: &str, needs_pas
     <button type="submit">Approve Access</button>
   </form>
 </body>
-</html>"#)
+</html>"#
+    )
 }
 
 // ── Route handlers ────────────────────────────────────────────────────────────
@@ -130,7 +138,13 @@ pub async fn authorize_page(
     let client_id = params.client_id.unwrap_or_default();
     let redirect_uri = params.redirect_uri.unwrap_or_default();
     let state = params.state.unwrap_or_default();
-    let html = approval_html(&client_id, &redirect_uri, &state, auth.password.is_some(), None);
+    let html = approval_html(
+        &client_id,
+        &redirect_uri,
+        &state,
+        auth.password.is_some(),
+        None,
+    );
     (StatusCode::OK, [("Content-Type", "text/html")], html)
 }
 
@@ -145,8 +159,19 @@ pub async fn authorize_approve(
             let client_id = form.client_id.as_deref().unwrap_or("");
             let redirect_uri = form.redirect_uri.as_deref().unwrap_or("");
             let state = form.state.as_deref().unwrap_or("");
-            let html = approval_html(client_id, redirect_uri, state, true, Some("Incorrect password."));
-            return (StatusCode::UNAUTHORIZED, [("Content-Type", "text/html")], html).into_response();
+            let html = approval_html(
+                client_id,
+                redirect_uri,
+                state,
+                true,
+                Some("Incorrect password."),
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("Content-Type", "text/html")],
+                html,
+            )
+                .into_response();
         }
     }
 
@@ -167,7 +192,11 @@ pub async fn authorize_approve(
     }
 
     let base_redirect = redirect_uri.unwrap_or_else(|| format!("{}/", auth.base_url));
-    let sep = if base_redirect.contains('?') { '&' } else { '?' };
+    let sep = if base_redirect.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
     let location = if let Some(s) = &form.state {
         format!("{base_redirect}{sep}code={code}&state={s}")
     } else {
@@ -190,17 +219,23 @@ pub async fn token_endpoint(
     match code_data {
         None => {
             debug!("token: code not found: {:.8}...", req.code);
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": "invalid_grant",
-                "error_description": "Code not found or already used"
-            })))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "Code not found or already used"
+                })),
+            )
         }
         Some(c) if c.created_at.elapsed() > std::time::Duration::from_secs(300) => {
             debug!("token: code expired");
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": "invalid_grant",
-                "error_description": "Code expired"
-            })))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "Code expired"
+                })),
+            )
         }
         Some(c) => {
             let token = generate_token();
@@ -209,25 +244,34 @@ pub async fn token_endpoint(
                 tokens.insert(token.clone(), c.client_id.clone());
                 persist_tokens(&tokens);
             }
-            debug!("token: issued {token:.8}... for client {:.8}...", c.client_id);
-            (StatusCode::OK, Json(serde_json::json!({
-                "access_token": token,
-                "token_type": "Bearer"
-            })))
+            debug!(
+                "token: issued {token:.8}... for client {:.8}...",
+                c.client_id
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "access_token": token,
+                    "token_type": "Bearer"
+                })),
+            )
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::{Arc, RwLock}};
     use axum::{
+        Extension, Router,
         body::Body,
         http::{Request, StatusCode},
         routing::{get, post},
-        Extension, Router,
     };
     use http_body_util::BodyExt;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, RwLock},
+    };
     use tower::ServiceExt;
 
     use crate::auth::{AuthState, SharedAuthState};
@@ -244,8 +288,14 @@ mod tests {
 
     fn app(auth: SharedAuthState) -> Router {
         Router::new()
-            .route("/.well-known/oauth-protected-resource", get(super::oauth_protected_resource))
-            .route("/.well-known/oauth-authorization-server", get(super::oauth_authorization_server))
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(super::oauth_protected_resource),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(super::oauth_authorization_server),
+            )
             .route("/authorize", get(super::authorize_page))
             .route("/authorize/approve", post(super::authorize_approve))
             .route("/token", post(super::token_endpoint))
@@ -261,11 +311,16 @@ mod tests {
     #[tokio::test]
     async fn protected_resource_returns_json() {
         let resp = app(make_auth(None))
-            .oneshot(Request::get("/.well-known/oauth-protected-resource").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/.well-known/oauth-protected-resource")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
         assert!(body["resource"].is_string());
         assert!(body["authorization_servers"].is_array());
     }
@@ -273,11 +328,16 @@ mod tests {
     #[tokio::test]
     async fn authorization_server_metadata() {
         let resp = app(make_auth(None))
-            .oneshot(Request::get("/.well-known/oauth-authorization-server").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/.well-known/oauth-authorization-server")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
         assert_eq!(body["issuer"], "http://localhost");
         assert!(body["authorization_endpoint"].is_string());
         assert!(body["token_endpoint"].is_string());
@@ -305,13 +365,16 @@ mod tests {
             .oneshot(
                 Request::post("/register")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"client_name":"TestApp","redirect_uris":["http://cb"]}"#))
+                    .body(Body::from(
+                        r#"{"client_name":"TestApp","redirect_uris":["http://cb"]}"#,
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
-        let body: serde_json::Value = serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
         assert!(body["client_id"].is_string());
         assert_eq!(body["client_name"], "TestApp");
     }
@@ -326,7 +389,9 @@ mod tests {
             .oneshot(
                 Request::post("/authorize/approve")
                     .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from("client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1"))
+                    .body(Body::from(
+                        "client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1",
+                    ))
                     .unwrap(),
             )
             .await
@@ -336,20 +401,29 @@ mod tests {
         assert!(location.contains("code="));
 
         // Extract code
-        let code = location.split("code=").nth(1).unwrap().split('&').next().unwrap();
+        let code = location
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
 
         // Exchange code for token
         let resp2 = app(auth)
             .oneshot(
                 Request::post("/token")
                     .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from(format!("grant_type=authorization_code&code={code}")))
+                    .body(Body::from(format!(
+                        "grant_type=authorization_code&code={code}"
+                    )))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_str(&body_str(resp2.into_body()).await).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_str(resp2.into_body()).await).unwrap();
         assert_eq!(body["token_type"], "Bearer");
         assert!(body["access_token"].is_string());
     }
@@ -374,7 +448,9 @@ mod tests {
             .oneshot(
                 Request::post("/authorize/approve")
                     .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from("client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1&password=wrong"))
+                    .body(Body::from(
+                        "client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1&password=wrong",
+                    ))
                     .unwrap(),
             )
             .await
@@ -388,7 +464,9 @@ mod tests {
             .oneshot(
                 Request::post("/authorize/approve")
                     .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from("client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1&password=secret"))
+                    .body(Body::from(
+                        "client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1&password=secret",
+                    ))
                     .unwrap(),
             )
             .await

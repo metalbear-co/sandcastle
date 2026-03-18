@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use jsonwebtoken::EncodingKey;
 use octocrab::{
-    models::{AppId, InstallationId},
     Octocrab,
+    models::{AppId, InstallationId},
 };
 
 const SERVICE: &str = "sandcastle";
@@ -33,16 +33,19 @@ fn keychain_get(key: &str) -> Result<String> {
 }
 
 pub enum GitHubCreds {
-    PersonalToken { token: String, user: String },
-    App { app_octocrab: Arc<Octocrab>, installation_id: u64 },
+    PersonalToken {
+        token: String,
+        user: String,
+    },
+    App {
+        app_octocrab: Arc<Octocrab>,
+        installation_id: u64,
+    },
 }
 
 pub fn load_github_creds() -> Result<(Arc<Octocrab>, GitHubCreds)> {
     // Env var override for CI/scripted use
-    if let (Ok(token), Ok(user)) = (
-        std::env::var("GITHUB_TOKEN"),
-        std::env::var("GITHUB_USER"),
-    ) {
+    if let (Ok(token), Ok(user)) = (std::env::var("GITHUB_TOKEN"), std::env::var("GITHUB_USER")) {
         let oct = Octocrab::builder()
             .personal_token(token.clone())
             .build()
@@ -60,7 +63,6 @@ pub fn load_github_creds() -> Result<(Arc<Octocrab>, GitHubCreds)> {
     // Run wizard — returns creds directly (also persists to keychain for future runs)
     run_wizard()
 }
-
 
 pub fn load_sandcastle_password() -> Result<Option<String>> {
     // Env var override
@@ -123,7 +125,10 @@ fn generate_password() -> String {
     buf.iter()
         .flat_map(|&b| {
             // split each byte into two 4-bit nibbles → index into 64-char alphabet
-            [ALPHABET[(b >> 4) as usize] as char, ALPHABET[(b & 0xf) as usize] as char]
+            [
+                ALPHABET[(b >> 4) as usize] as char,
+                ALPHABET[(b & 0xf) as usize] as char,
+            ]
         })
         .collect()
 }
@@ -185,7 +190,11 @@ fn prompt(msg: &str) -> Result<String> {
     io::stderr().flush()?;
     let mut line = String::new();
     io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim_end_matches('\n').trim_end_matches('\r').trim().to_string())
+    Ok(line
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .trim()
+        .to_string())
 }
 
 fn run_wizard() -> Result<(Arc<Octocrab>, GitHubCreds)> {
@@ -228,7 +237,9 @@ fn wizard_personal_token() -> Result<(Arc<Octocrab>, GitHubCreds)> {
         keychain_set("github_user", &user)?;
         keychain_set("auth_mode", "personal_token")
     })() {
-        eprintln!("Warning: could not save to keychain ({e}). You will be prompted again next run.");
+        eprintln!(
+            "Warning: could not save to keychain ({e}). You will be prompted again next run."
+        );
     } else {
         eprintln!("\nCredentials saved to keychain.");
     }
@@ -277,9 +288,12 @@ fn wizard_github_app() -> Result<(Arc<Octocrab>, GitHubCreds)> {
         loop {
             let mut line = String::new();
             io::stdin().lock().read_line(&mut line)?;
-            let line = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
-            let done = line == "-----END RSA PRIVATE KEY-----"
-                || line == "-----END PRIVATE KEY-----";
+            let line = line
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string();
+            let done =
+                line == "-----END RSA PRIVATE KEY-----" || line == "-----END PRIVATE KEY-----";
             lines.push(line);
             if done {
                 break;
@@ -299,7 +313,9 @@ fn wizard_github_app() -> Result<(Arc<Octocrab>, GitHubCreds)> {
         keychain_set("github_app_private_key", &pem)?;
         keychain_set("auth_mode", "github_app")
     })() {
-        eprintln!("Warning: could not save to keychain ({e}). You will be prompted again next run.");
+        eprintln!(
+            "Warning: could not save to keychain ({e}). You will be prompted again next run."
+        );
     } else {
         eprintln!("\nApp credentials saved to keychain.");
     }

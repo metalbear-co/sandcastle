@@ -45,6 +45,7 @@ impl Sandbox for LocalSandbox {
         &self.work_dir
     }
 
+    #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
     async fn read_file(&self, path: &str, offset: Option<u32>, limit: Option<u32>) -> String {
         if let Err(e) = self.ensure_in_sandbox(path) {
             return e;
@@ -75,6 +76,7 @@ impl Sandbox for LocalSandbox {
             .join("\n")
     }
 
+    #[tracing::instrument(skip(self, content), fields(sandbox = %self.id, bytes = content.len()))]
     async fn write_file(&self, path: &str, content: &str) -> String {
         if let Err(e) = self.ensure_in_sandbox(path) {
             return e;
@@ -91,6 +93,7 @@ impl Sandbox for LocalSandbox {
         }
     }
 
+    #[tracing::instrument(skip(self, old_string, new_string), fields(sandbox = %self.id))]
     async fn edit_file(&self, path: &str, old_string: &str, new_string: &str) -> String {
         if let Err(e) = self.ensure_in_sandbox(path) {
             return e;
@@ -113,6 +116,7 @@ impl Sandbox for LocalSandbox {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
     async fn glob(&self, pattern: &str, base_path: Option<String>) -> String {
         let base = base_path.unwrap_or_else(|| self.work_dir.display().to_string());
         let full_pattern = format!("{base}/{pattern}");
@@ -138,6 +142,7 @@ impl Sandbox for LocalSandbox {
         serde_json::to_string(&matches).unwrap_or_default()
     }
 
+    #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
     async fn grep(&self, pattern: &str, path: Option<String>, include: Option<String>) -> String {
         let re = match Regex::new(pattern) {
             Ok(r) => r,
@@ -191,6 +196,7 @@ impl Sandbox for LocalSandbox {
         results.join("\n")
     }
 
+    #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
     async fn run_command(&self, command: &str, dir: Option<String>) -> String {
         let work_dir = dir.unwrap_or_else(|| self.work_dir.display().to_string());
         match Command::new("sh")
@@ -212,7 +218,8 @@ impl Sandbox for LocalSandbox {
         }
     }
 
-    async fn clone_repository(&self, repo: &str, auth_url: &str) -> String {
+    #[tracing::instrument(skip(self, url), fields(sandbox = %self.id))]
+    async fn clone_repository(&self, repo: &str, url: &str) -> String {
         let dest = self.work_dir.join(repo);
 
         if dest.exists() {
@@ -226,7 +233,7 @@ impl Sandbox for LocalSandbox {
         }
 
         match Command::new("git")
-            .args(["clone", auth_url, dest.to_str().unwrap()])
+            .args(["clone", url, dest.to_str().unwrap()])
             .output()
             .await
         {
@@ -236,6 +243,7 @@ impl Sandbox for LocalSandbox {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
     async fn git_commit_and_push(&self, repo: &str, branch: &str, commit_message: &str) -> String {
         let repo_dir = self.work_dir.join(repo);
 
@@ -277,10 +285,7 @@ impl Sandbox for LocalSandbox {
             .await
         {
             Ok(o) if !o.status.success() => {
-                return format!(
-                    "git commit failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
+                return format!("git commit failed: {}", String::from_utf8_lossy(&o.stderr));
             }
             Err(e) => return format!("Failed to run git commit: {e}"),
             _ => {}
@@ -293,10 +298,7 @@ impl Sandbox for LocalSandbox {
             .await
         {
             Ok(o) if !o.status.success() => {
-                return format!(
-                    "git push failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
+                return format!("git push failed: {}", String::from_utf8_lossy(&o.stderr));
             }
             Err(e) => return format!("Failed to run git push: {e}"),
             _ => {}
@@ -367,7 +369,10 @@ impl Provider for LocalProvider {
             .map_err(|e| format!("Failed to create sandbox: {e}"))?;
         self.sandboxes.write().await.insert(
             id.clone(),
-            SandboxRecord { work_dir: work_dir.clone(), created_at: Instant::now() },
+            SandboxRecord {
+                work_dir: work_dir.clone(),
+                created_at: Instant::now(),
+            },
         );
         Ok(Arc::new(LocalSandbox { id, work_dir }))
     }
