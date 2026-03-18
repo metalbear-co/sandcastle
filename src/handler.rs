@@ -145,6 +145,20 @@ impl SandcastleHandler {
         self.sandbox.read().unwrap().clone()
     }
 
+    fn ensure_in_sandbox(&self, path: &str) -> Result<(), String> {
+        let sandbox = self.get_sandbox()
+            .ok_or_else(|| "Error: no sandbox active. Call create_sandbox first.".to_string())?;
+        let p = std::path::Path::new(path);
+        if !p.starts_with(&sandbox.work_dir) {
+            return Err(format!(
+                "Error: path {path} is outside the sandbox ({}). \
+                 File operations are restricted to the sandbox directory.",
+                sandbox.work_dir.display()
+            ));
+        }
+        Ok(())
+    }
+
     #[tool(description = "List available sandbox providers")]
     async fn list_providers(&self) -> String {
         let list: Vec<serde_json::Value> = self
@@ -292,8 +306,8 @@ impl SandcastleHandler {
         &self,
         Parameters(ReadFileParams { path, offset, limit }): Parameters<ReadFileParams>,
     ) -> String {
-        if self.get_sandbox().is_none() {
-            return "Error: no sandbox active. Call create_sandbox first.".to_string();
+        if let Err(e) = self.ensure_in_sandbox(&path) {
+            return e;
         }
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
@@ -326,8 +340,8 @@ impl SandcastleHandler {
         &self,
         Parameters(WriteFileParams { path, content }): Parameters<WriteFileParams>,
     ) -> String {
-        if self.get_sandbox().is_none() {
-            return "Error: no sandbox active. Call create_sandbox first.".to_string();
+        if let Err(e) = self.ensure_in_sandbox(&path) {
+            return e;
         }
         let p = Path::new(&path);
         if let Some(parent) = p.parent()
@@ -346,8 +360,8 @@ impl SandcastleHandler {
         &self,
         Parameters(EditFileParams { path, old_string, new_string }): Parameters<EditFileParams>,
     ) -> String {
-        if self.get_sandbox().is_none() {
-            return "Error: no sandbox active. Call create_sandbox first.".to_string();
+        if let Err(e) = self.ensure_in_sandbox(&path) {
+            return e;
         }
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
@@ -609,10 +623,15 @@ impl ServerHandler for SandcastleHandler {
                 or shell access for any of these tasks — always delegate to the sandbox tools. \
                 Workflow: call create_sandbox first, then use the sandbox tools for everything else. \
                 list_repositories and list_providers are available before creating a sandbox. \
+                \n\nSandbox isolation: read_file, write_file, and edit_file are restricted to paths \
+                within the active sandbox directory. Always use paths under the sandbox work_dir \
+                (returned by create_sandbox). This applies to ALL file operations including plan \
+                files — when asked to write or read a plan file, write it to a path inside the \
+                sandbox (e.g. <sandbox_work_dir>/plan.md) and read it back from there.\
                 \n\nTool reference:\
-                \n- read_file(path, offset?, limit?): read a file; offset/limit for line ranges with line numbers\
-                \n- write_file(path, content): create or overwrite a file\
-                \n- edit_file(path, old_string, new_string): targeted search-replace within a file\
+                \n- read_file(path, offset?, limit?): read a file within the sandbox; offset/limit for line ranges with line numbers\
+                \n- write_file(path, content): create or overwrite a file within the sandbox\
+                \n- edit_file(path, old_string, new_string): targeted search-replace within a sandbox file\
                 \n- glob(pattern, path?): find files matching a glob pattern (e.g. **/*.rs)\
                 \n- grep(pattern, path?, include?): search file contents with regex\
                 \n- run_command(command, dir?): run a shell command (dir defaults to sandbox root)"
