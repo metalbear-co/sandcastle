@@ -25,7 +25,7 @@ Because the agent is just an MCP client, it can run anywhere that supports MCP �
                  │
       ┌──────────▼──────────┐
       │  Sandbox Provider   │
-      │  (GitHub, Docker,   │
+      │  (Docker, Daytona,  │
       │   VMs, etc.)        │
       └─────────────────────┘
 ```
