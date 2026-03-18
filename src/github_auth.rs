@@ -8,29 +8,7 @@ use octocrab::{
     models::{AppId, InstallationId},
 };
 
-const SERVICE: &str = "sandcastle";
-
-fn keychain_set(key: &str, value: &str) -> Result<()> {
-    keyring::Entry::new(SERVICE, key)
-        .map_err(|e| anyhow::anyhow!("keychain entry error for '{key}': {e}"))?
-        .set_password(value)
-        .map_err(|e| anyhow::anyhow!("keychain write error for '{key}': {e}"))
-}
-
-fn keychain_get_optional(key: &str) -> Result<Option<String>> {
-    match keyring::Entry::new(SERVICE, key)
-        .map_err(|e| anyhow::anyhow!("keychain entry error: {e}"))?
-        .get_password()
-    {
-        Ok(v) => Ok(Some(v)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(anyhow::anyhow!("keychain read error for '{key}': {e}")),
-    }
-}
-
-fn keychain_get(key: &str) -> Result<String> {
-    keychain_get_optional(key)?.ok_or_else(|| anyhow::anyhow!("'{key}' not found in keychain"))
-}
+use crate::keychain::{StoredConfig, load_config, save_config};
 
 pub enum GitHubCreds {
     PersonalToken {
@@ -43,7 +21,7 @@ pub enum GitHubCreds {
     },
 }
 
-pub fn load_github_creds() -> Result<(Arc<Octocrab>, GitHubCreds)> {
+pub fn load_github_creds(config: &StoredConfig) -> Result<(Arc<Octocrab>, GitHubCreds)> {
     // Env var override for CI/scripted use
     if let (Ok(token), Ok(user)) = (std::env::var("GITHUB_TOKEN"), std::env::var("GITHUB_USER")) {
         let oct = Octocrab::builder()
@@ -54,7 +32,7 @@ pub fn load_github_creds() -> Result<(Arc<Octocrab>, GitHubCreds)> {
     }
 
     // Try keychain
-    match load_from_keychain() {
+    match load_from_keychain(config) {
         Ok(Some(result)) => return Ok(result),
         Ok(None) => {}
         Err(e) => eprintln!("Warning: could not read credentials from keychain: {e:#}"),
@@ -64,14 +42,14 @@ pub fn load_github_creds() -> Result<(Arc<Octocrab>, GitHubCreds)> {
     run_wizard()
 }
 
-pub fn load_sandcastle_password() -> Result<Option<String>> {
+pub fn load_sandcastle_password(config: &StoredConfig) -> Result<Option<String>> {
     // Env var override
     if let Ok(pw) = std::env::var("SANDCASTLE_PASSWORD") {
         return Ok(Some(pw));
     }
 
     // Try keychain
-    if let Some(pw) = keychain_get_optional("sandcastle_password")? {
+    if let Some(pw) = config.sandcastle_password.clone() {
         return Ok(Some(pw));
     }
 
@@ -95,7 +73,7 @@ pub fn load_sandcastle_password() -> Result<Option<String>> {
             let pw = generate_password();
             eprintln!("\nGenerated password: {pw}");
             eprintln!("(stored in keychain — shown only once)\n");
-            keychain_set("sandcastle_password", &pw)?;
+            save_password_to_keychain(&pw);
             Ok(Some(pw))
         }
         "2" => {
@@ -107,11 +85,21 @@ pub fn load_sandcastle_password() -> Result<Option<String>> {
                     break p;
                 }
             };
-            keychain_set("sandcastle_password", &pw)?;
+            save_password_to_keychain(&pw);
             Ok(Some(pw))
         }
         "3" => Ok(None),
         _ => unreachable!(),
+    }
+}
+
+fn save_password_to_keychain(pw: &str) {
+    let mut config = load_config();
+    config.sandcastle_password = Some(pw.to_string());
+    if let Err(e) = save_config(&config) {
+        eprintln!(
+            "Warning: could not save to keychain ({e}). You will be prompted again next run."
+        );
     }
 }
 
@@ -133,16 +121,22 @@ fn generate_password() -> String {
         .collect()
 }
 
-fn load_from_keychain() -> Result<Option<(Arc<Octocrab>, GitHubCreds)>> {
-    let auth_mode = match keychain_get_optional("auth_mode")? {
+fn load_from_keychain(config: &StoredConfig) -> Result<Option<(Arc<Octocrab>, GitHubCreds)>> {
+    let auth_mode = match config.auth_mode.as_deref() {
         Some(v) => v,
         None => return Ok(None),
     };
 
-    match auth_mode.as_str() {
+    match auth_mode {
         "personal_token" => {
-            let token = keychain_get("github_token")?;
-            let user = keychain_get("github_user")?;
+            let token = config
+                .github_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("'github_token' not found in config"))?;
+            let user = config
+                .github_user
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("'github_user' not found in config"))?;
             let oct = Octocrab::builder()
                 .personal_token(token.clone())
                 .build()
@@ -153,16 +147,25 @@ fn load_from_keychain() -> Result<Option<(Arc<Octocrab>, GitHubCreds)>> {
             )))
         }
         "github_app" => {
-            let app_id: u64 = keychain_get("github_app_id")?
+            let app_id: u64 = config
+                .github_app_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("'github_app_id' not found in config"))?
                 .parse()
-                .context("invalid app_id in keychain")?;
-            let installation_id: u64 = keychain_get("github_app_installation_id")?
+                .context("invalid app_id in config")?;
+            let installation_id: u64 = config
+                .github_app_installation_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("'github_app_installation_id' not found in config"))?
                 .parse()
-                .context("invalid installation_id in keychain")?;
-            let private_key = keychain_get("github_app_private_key")?;
+                .context("invalid installation_id in config")?;
+            let private_key = config
+                .github_app_private_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("'github_app_private_key' not found in config"))?;
 
             let key = EncodingKey::from_rsa_pem(private_key.as_bytes())
-                .context("invalid private key PEM in keychain")?;
+                .context("invalid private key PEM in config")?;
 
             let app_oct = Octocrab::builder()
                 .app(AppId(app_id), key)
@@ -181,7 +184,7 @@ fn load_from_keychain() -> Result<Option<(Arc<Octocrab>, GitHubCreds)>> {
                 },
             )))
         }
-        other => anyhow::bail!("unknown auth_mode in keychain: {other}"),
+        other => anyhow::bail!("unknown auth_mode in config: {other}"),
     }
 }
 
@@ -232,11 +235,11 @@ fn wizard_personal_token() -> Result<(Arc<Octocrab>, GitHubCreds)> {
     }
 
     // Persist to keychain (best-effort — warn but don't fail if keychain is unavailable)
-    if let Err(e) = (|| -> Result<()> {
-        keychain_set("github_token", &token)?;
-        keychain_set("github_user", &user)?;
-        keychain_set("auth_mode", "personal_token")
-    })() {
+    let mut config = load_config();
+    config.github_token = Some(token.clone());
+    config.github_user = Some(user.clone());
+    config.auth_mode = Some("personal_token".to_string());
+    if let Err(e) = save_config(&config) {
         eprintln!(
             "Warning: could not save to keychain ({e}). You will be prompted again next run."
         );
@@ -307,12 +310,12 @@ fn wizard_github_app() -> Result<(Arc<Octocrab>, GitHubCreds)> {
     };
 
     // Persist to keychain (best-effort)
-    if let Err(e) = (|| -> Result<()> {
-        keychain_set("github_app_id", &app_id_str)?;
-        keychain_set("github_app_installation_id", &installation_id_str)?;
-        keychain_set("github_app_private_key", &pem)?;
-        keychain_set("auth_mode", "github_app")
-    })() {
+    let mut config = load_config();
+    config.github_app_id = Some(app_id_str);
+    config.github_app_installation_id = Some(installation_id_str);
+    config.github_app_private_key = Some(pem);
+    config.auth_mode = Some("github_app".to_string());
+    if let Err(e) = save_config(&config) {
         eprintln!(
             "Warning: could not save to keychain ({e}). You will be prompted again next run."
         );

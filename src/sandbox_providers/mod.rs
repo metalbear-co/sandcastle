@@ -1,3 +1,5 @@
+pub mod daytona;
+pub mod docker;
 pub mod local;
 
 use std::path::PathBuf;

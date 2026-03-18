@@ -23,15 +23,16 @@ pub struct LocalSandbox {
 
 impl LocalSandbox {
     fn ensure_in_sandbox(&self, path: &str) -> Result<(), String> {
-        // Canonicalize work_dir (it always exists) to resolve any symlinks in the
-        // sandbox root itself, then lexically normalize the target path to collapse
-        // `.` and `..` without requiring it to exist on disk.
         let canonical_root =
             std::fs::canonicalize(&self.work_dir).unwrap_or_else(|_| self.work_dir.clone());
 
+        // Lexically collapse `.` / `..` first, then canonicalize as far as the
+        // filesystem allows (walking up to the first existing ancestor so that
+        // paths for not-yet-created files are handled correctly).
         let normalized = lexical_normalize(Path::new(path));
+        let canonical_path = canonicalize_best_effort(&normalized);
 
-        if !normalized.starts_with(&canonical_root) {
+        if !canonical_path.starts_with(&canonical_root) {
             return Err(format!(
                 "Error: path {path} is outside the sandbox ({}). \
                  File operations are restricted to the sandbox directory.",
@@ -390,6 +391,34 @@ fn lexical_normalize(path: &Path) -> PathBuf {
         }
     }
     out.iter().collect()
+}
+
+/// Canonicalize a path, walking up to the first existing ancestor when the
+/// path itself doesn't exist yet (e.g. a file about to be written).  This
+/// ensures that symlinks in the path prefix (e.g. `/tmp` → `/private/tmp` on
+/// macOS) are resolved consistently with how the sandbox root is resolved.
+fn canonicalize_best_effort(path: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    // Walk upward until we find an existing ancestor.
+    let mut current = path.to_path_buf();
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    while let Some(parent) = current.parent() {
+        if let Some(name) = current.file_name() {
+            suffix.push(name.to_os_string());
+        }
+        current = parent.to_path_buf();
+        if let Ok(canonical) = std::fs::canonicalize(&current) {
+            let mut result = canonical;
+            for component in suffix.into_iter().rev() {
+                result.push(component);
+            }
+            return result;
+        }
+    }
+    // Fallback: return the lexically normalized path as-is.
+    path.to_path_buf()
 }
 
 // ── LocalProvider ─────────────────────────────────────────────────────────────

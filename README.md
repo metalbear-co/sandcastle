@@ -50,58 +50,21 @@ The wizard will walk you through configuration and connecting your agent.
 
 > **Tip:** MCP clients like Claude.ai need to reach Sandcastle over HTTPS. Use [ngrok](https://ngrok.com) to get a public URL — when the wizard asks for a base URL, use the one ngrok provides (e.g. `https://abc123.ngrok-free.app`).
 
----
+### 3. Add Sandcastle to your MCP client
 
-## Current Implementation: GitHub Sandbox
-
-The current sandbox provider uses GitHub as the execution environment — clone a repo, make changes, run commands, and open a PR.
-
-### Tools
-
-| Tool | Description |
-|------|-------------|
-| `list_repositories` | List GitHub repos accessible with the configured token |
-| `clone_repository` | Clone a repo to `/tmp/sandcastle/<owner>/<repo>` |
-| `read_file` | Read a file from a cloned repo |
-| `edit_file` | Write/replace a file's content |
-| `run_command` | Run a shell command inside a repo directory |
-| `create_pr` | Commit changes, push a branch, and open a GitHub PR |
-
-### Setup
-
-```bash
-export GITHUB_TOKEN=<your-token>
-export GITHUB_USER=<your-username>
-export PORT=3000  # optional, defaults to 3000
-
-cargo run
-```
-
-The server starts at `http://0.0.0.0:3000` and speaks the [MCP Streamable HTTP](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/#streamable-http) transport.
-
-### Connecting an Agent
-
-Point your MCP client at the server URL. For Claude Desktop or Claude Code:
+Point your MCP client at the Sandcastle URL. For Claude Desktop or Claude Code:
 
 ```json
 {
   "mcpServers": {
     "sandcastle": {
-      "url": "http://localhost:3000"
+      "url": "https://abc123.ngrok-free.app"
     }
   }
 }
 ```
 
-### Example Agent Workflow
-
-Once connected, an agent can:
-
-1. Call `list_repositories` to see available repos
-2. Call `clone_repository` with `"owner/repo"` to get a local copy
-3. Call `read_file` and `edit_file` to make changes
-4. Call `run_command` to build, test, or lint
-5. Call `create_pr` to ship the result
+For local use without ngrok, use `http://localhost:3000`.
 
 ## Roadmap
 

@@ -1,6 +1,9 @@
 mod auth;
+mod config;
+mod daytona_auth;
 mod github_auth;
 mod handler;
+mod keychain;
 mod sandbox_providers;
 
 use std::{
@@ -27,7 +30,9 @@ use auth::handlers::{
 use auth::middleware::require_auth;
 use auth::{AuthState, SharedAuthState, load_persisted_tokens};
 use handler::SandcastleHandler;
-use sandbox_providers::{Provider, local::LocalProvider};
+use sandbox_providers::{
+    Provider, daytona::DaytonaProvider, docker::DockerProvider, local::LocalProvider,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,13 +53,15 @@ async fn main() -> Result<()> {
 
     let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
 
-    let (octocrab, creds) = github_auth::load_github_creds()?;
+    let stored_config = keychain::load_config();
+
+    let (octocrab, creds) = github_auth::load_github_creds(&stored_config)?;
     let creds = Arc::new(creds);
-    let password = github_auth::load_sandcastle_password()?;
+    let password = github_auth::load_sandcastle_password(&stored_config)?;
 
     let auth_state: SharedAuthState = Arc::new(AuthState {
         pending_codes: RwLock::new(HashMap::new()),
-        valid_tokens: RwLock::new(load_persisted_tokens()),
+        valid_tokens: RwLock::new(load_persisted_tokens(&stored_config)),
         base_url: base_url.clone(),
         no_auth,
         password,
@@ -77,9 +84,47 @@ async fn main() -> Result<()> {
         info!("auth: open {base_url}/authorize to approve MCP access");
     }
 
-    let local = LocalProvider::new(Duration::from_secs(120 * 60));
-    local.start_cleanup_task();
-    let providers: Vec<Arc<dyn Provider>> = vec![local];
+    let enabled = config::load_provider_selection()?;
+
+    let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
+
+    if enabled.contains(&"local".to_string()) {
+        let local = LocalProvider::new(Duration::from_secs(120 * 60));
+        local.start_cleanup_task();
+        providers.push(local);
+        info!("local sandbox provider registered");
+    }
+
+    if enabled.contains(&"docker".to_string()) {
+        match DockerProvider::new(Duration::from_secs(120 * 60)) {
+            Ok(docker) => {
+                docker.start_cleanup_task();
+                providers.push(docker);
+                info!("docker sandbox provider registered");
+            }
+            Err(e) => tracing::warn!("docker provider unavailable: {e}"),
+        }
+    }
+
+    if enabled.contains(&"daytona".to_string()) {
+        match daytona_auth::load_daytona_creds(&stored_config) {
+            Ok(creds) => {
+                match DaytonaProvider::new(
+                    creds.api_key,
+                    creds.base_url,
+                    Duration::from_secs(120 * 60),
+                ) {
+                    Ok(daytona) => {
+                        daytona.start_cleanup_task();
+                        providers.push(daytona);
+                        info!("daytona sandbox provider registered");
+                    }
+                    Err(e) => tracing::warn!("daytona provider unavailable: {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("daytona credentials unavailable: {e}"),
+        }
+    }
 
     let service = StreamableHttpService::new(
         move || {
