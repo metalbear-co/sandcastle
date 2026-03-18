@@ -1,8 +1,7 @@
-use std::{path::Path, sync::{Arc, RwLock}};
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use octocrab::{models::InstallationId, Octocrab};
-use regex::Regex;
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -12,8 +11,6 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
-use tokio::process::Command;
-use walkdir::WalkDir;
 
 use crate::github_auth::GitHubCreds;
 use crate::sandbox_providers::{Provider, Sandbox};
@@ -121,7 +118,7 @@ pub struct SandcastleHandler {
     tool_router: ToolRouter<Self>,
     octocrab: Arc<Octocrab>,
     creds: Arc<GitHubCreds>,
-    sandbox: Arc<RwLock<Option<Sandbox>>>,
+    sandbox: Arc<RwLock<Option<Arc<dyn Sandbox>>>>,
     providers: Vec<Arc<dyn Provider>>,
 }
 
@@ -141,22 +138,8 @@ impl SandcastleHandler {
         }
     }
 
-    fn get_sandbox(&self) -> Option<Sandbox> {
+    fn get_sandbox(&self) -> Option<Arc<dyn Sandbox>> {
         self.sandbox.read().unwrap().clone()
-    }
-
-    fn ensure_in_sandbox(&self, path: &str) -> Result<(), String> {
-        let sandbox = self.get_sandbox()
-            .ok_or_else(|| "Error: no sandbox active. Call create_sandbox first.".to_string())?;
-        let p = std::path::Path::new(path);
-        if !p.starts_with(&sandbox.work_dir) {
-            return Err(format!(
-                "Error: path {path} is outside the sandbox ({}). \
-                 File operations are restricted to the sandbox directory.",
-                sandbox.work_dir.display()
-            ));
-        }
-        Ok(())
     }
 
     #[tool(description = "List available sandbox providers")]
@@ -183,8 +166,8 @@ impl SandcastleHandler {
             Some(p) => match p.create().await {
                 Err(e) => e,
                 Ok(sandbox) => {
-                    let id = sandbox.id.clone();
-                    let path = sandbox.work_dir.display().to_string();
+                    let id = sandbox.id().to_string();
+                    let path = sandbox.work_dir().display().to_string();
                     *self.sandbox.write().unwrap() = Some(sandbox);
                     format!("Sandbox created at {path} (id: {id})")
                 }
@@ -200,7 +183,7 @@ impl SandcastleHandler {
         for p in &self.providers {
             match p.resume(&id).await {
                 Ok(sandbox) => {
-                    let path = sandbox.work_dir.display().to_string();
+                    let path = sandbox.work_dir().display().to_string();
                     *self.sandbox.write().unwrap() = Some(sandbox);
                     return format!("Resumed sandbox {id} at {path}");
                 }
@@ -258,19 +241,8 @@ impl SandcastleHandler {
             Some(s) => s,
             None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
         };
-        let dest = sandbox.work_dir.join(&repo);
 
-        if dest.exists() {
-            return format!("Already cloned at {}", dest.display());
-        }
-
-        if let Some(parent) = dest.parent()
-            && let Err(e) = tokio::fs::create_dir_all(parent).await
-        {
-            return format!("Failed to create directory: {e}");
-        }
-
-        let url = match self.creds.as_ref() {
+        let auth_url = match self.creds.as_ref() {
             GitHubCreds::PersonalToken { token, user } => {
                 format!("https://{user}:{token}@github.com/{repo}.git")
             }
@@ -290,15 +262,8 @@ impl SandcastleHandler {
                 }
             }
         };
-        match Command::new("git")
-            .args(["clone", &url, dest.to_str().unwrap()])
-            .output()
-            .await
-        {
-            Ok(o) if o.status.success() => format!("Cloned to {}", dest.display()),
-            Ok(o) => format!("git clone failed: {}", String::from_utf8_lossy(&o.stderr)),
-            Err(e) => format!("Failed to run git: {e}"),
-        }
+
+        sandbox.clone_repository(&repo, &auth_url).await
     }
 
     #[tool(description = "Read a file from the sandbox. Optionally specify offset (1-indexed start line) and limit (max lines) to read a range; line numbers are prefixed when a range is requested.")]
@@ -306,33 +271,10 @@ impl SandcastleHandler {
         &self,
         Parameters(ReadFileParams { path, offset, limit }): Parameters<ReadFileParams>,
     ) -> String {
-        if let Err(e) = self.ensure_in_sandbox(&path) {
-            return e;
+        match self.get_sandbox() {
+            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
+            Some(s) => s.read_file(&path, offset, limit).await,
         }
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
-            Err(e) => return format!("Error reading {path}: {e}"),
-        };
-
-        if offset.is_none() && limit.is_none() {
-            return content;
-        }
-
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
-        let start = (offset.unwrap_or(1).saturating_sub(1)) as usize;
-        let start = start.min(total);
-        let end = match limit {
-            Some(n) => (start + n as usize).min(total),
-            None => total,
-        };
-
-        lines[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}\t{line}", start + i + 1))
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     #[tool(description = "Create or overwrite a file with the given content. Parent directories are created automatically.")]
@@ -340,18 +282,9 @@ impl SandcastleHandler {
         &self,
         Parameters(WriteFileParams { path, content }): Parameters<WriteFileParams>,
     ) -> String {
-        if let Err(e) = self.ensure_in_sandbox(&path) {
-            return e;
-        }
-        let p = Path::new(&path);
-        if let Some(parent) = p.parent()
-            && let Err(e) = tokio::fs::create_dir_all(parent).await
-        {
-            return format!("Failed to create parent dirs: {e}");
-        }
-        match tokio::fs::write(&path, &content).await {
-            Ok(()) => format!("Written {} bytes to {path}", content.len()),
-            Err(e) => format!("Error writing {path}: {e}"),
+        match self.get_sandbox() {
+            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
+            Some(s) => s.write_file(&path, &content).await,
         }
     }
 
@@ -360,24 +293,9 @@ impl SandcastleHandler {
         &self,
         Parameters(EditFileParams { path, old_string, new_string }): Parameters<EditFileParams>,
     ) -> String {
-        if let Err(e) = self.ensure_in_sandbox(&path) {
-            return e;
-        }
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
-            Err(e) => return format!("Error reading {path}: {e}"),
-        };
-        let count = content.matches(old_string.as_str()).count();
-        match count {
-            0 => format!("Error: old_string not found in {path}"),
-            1 => {
-                let new_content = content.replacen(old_string.as_str(), new_string.as_str(), 1);
-                match tokio::fs::write(&path, &new_content).await {
-                    Ok(()) => format!("Edited {path}: replaced 1 occurrence"),
-                    Err(e) => format!("Error writing {path}: {e}"),
-                }
-            }
-            n => format!("Error: old_string matches {n} times in {path} — make it more specific"),
+        match self.get_sandbox() {
+            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
+            Some(s) => s.edit_file(&path, &old_string, &new_string).await,
         }
     }
 
@@ -386,32 +304,10 @@ impl SandcastleHandler {
         &self,
         Parameters(GlobParams { pattern, path }): Parameters<GlobParams>,
     ) -> String {
-        let sandbox = match self.get_sandbox() {
-            Some(s) => s,
-            None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
-        };
-        let base = path.unwrap_or_else(|| sandbox.work_dir.display().to_string());
-        let full_pattern = format!("{base}/{pattern}");
-
-        let entries = match ::glob::glob(&full_pattern) {
-            Ok(paths) => paths,
-            Err(e) => return format!("Error: invalid glob pattern: {e}"),
-        };
-
-        let mut matches: Vec<String> = Vec::new();
-        for entry in entries {
-            match entry {
-                Ok(p) => {
-                    matches.push(p.display().to_string());
-                    if matches.len() >= 1000 {
-                        matches.push("... (truncated at 1000 results)".to_string());
-                        break;
-                    }
-                }
-                Err(_) => continue,
-            }
+        match self.get_sandbox() {
+            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
+            Some(s) => s.glob(&pattern, path).await,
         }
-        serde_json::to_string(&matches).unwrap_or_default()
     }
 
     #[tool(description = "Search file contents using a regex pattern. Returns matching lines as \"path:line_num:content\". Optionally filter files by name pattern (include), e.g. \"*.rs\".")]
@@ -419,61 +315,10 @@ impl SandcastleHandler {
         &self,
         Parameters(GrepParams { pattern, path, include }): Parameters<GrepParams>,
     ) -> String {
-        let sandbox = match self.get_sandbox() {
-            Some(s) => s,
-            None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
-        };
-
-        let re = match Regex::new(&pattern) {
-            Ok(r) => r,
-            Err(e) => return format!("Error: invalid regex pattern: {e}"),
-        };
-
-        let search_path = path.unwrap_or_else(|| sandbox.work_dir.display().to_string());
-        let search_path = std::path::Path::new(&search_path);
-
-        let files: Vec<std::path::PathBuf> = if search_path.is_file() {
-            vec![search_path.to_path_buf()]
-        } else {
-            WalkDir::new(search_path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .filter(|e| {
-                    if let Some(ref inc) = include {
-                        let filename = e.file_name().to_string_lossy();
-                        ::glob::Pattern::new(inc)
-                            .map(|p| p.matches(&filename))
-                            .unwrap_or(false)
-                    } else {
-                        true
-                    }
-                })
-                .map(|e| e.into_path())
-                .collect()
-        };
-
-        let mut results: Vec<String> = Vec::new();
-        let mut total = 0usize;
-        'outer: for file in &files {
-            let content = match std::fs::read_to_string(file) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            for (line_num, line) in content.lines().enumerate() {
-                if re.is_match(line) {
-                    total += 1;
-                    if results.len() < 100 {
-                        results.push(format!("{}:{}:{}", file.display(), line_num + 1, line));
-                    } else {
-                        results.push(format!("... (truncated, {total}+ matches total)"));
-                        break 'outer;
-                    }
-                }
-            }
+        match self.get_sandbox() {
+            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
+            Some(s) => s.grep(&pattern, path, include).await,
         }
-
-        results.join("\n")
     }
 
     #[tool(description = "Run a shell command in the sandbox. dir defaults to the sandbox work directory if not specified.")]
@@ -481,27 +326,9 @@ impl SandcastleHandler {
         &self,
         Parameters(RunCommandParams { command, dir }): Parameters<RunCommandParams>,
     ) -> String {
-        let sandbox = match self.get_sandbox() {
-            Some(s) => s,
-            None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
-        };
-        let work_dir = dir.unwrap_or_else(|| sandbox.work_dir.display().to_string());
-        match Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .current_dir(&work_dir)
-            .output()
-            .await
-        {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                format!(
-                    "exit_code: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                    o.status.code().unwrap_or(-1)
-                )
-            }
-            Err(e) => format!("Failed to run command: {e}"),
+        match self.get_sandbox() {
+            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
+            Some(s) => s.run_command(&command, dir).await,
         }
     }
 
@@ -522,71 +349,14 @@ impl SandcastleHandler {
             Some(s) => s,
             None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
         };
-        let repo_dir = sandbox.work_dir.join(&repo);
 
-        for args in &[
-            vec!["config", "user.email", "sandcastle@localhost"],
-            vec!["config", "user.name", "sandcastle"],
-        ] {
-            let _ = Command::new("git")
-                .args(args)
-                .current_dir(&repo_dir)
-                .output()
-                .await;
+        // Git work → sandbox
+        let result = sandbox.git_commit_and_push(&repo, &branch, &commit_message).await;
+        if result != "ok" {
+            return result;
         }
 
-        let checkout = Command::new("git")
-            .args(["checkout", "-b", &branch])
-            .current_dir(&repo_dir)
-            .output()
-            .await;
-        if let Err(e) = checkout {
-            return format!("Failed to create branch: {e}");
-        }
-
-        let add = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(&repo_dir)
-            .output()
-            .await;
-        if let Ok(o) = &add
-            && !o.status.success()
-        {
-            return format!("git add failed: {}", String::from_utf8_lossy(&o.stderr));
-        }
-
-        match Command::new("git")
-            .args(["commit", "-m", &commit_message])
-            .current_dir(&repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) if !o.status.success() => {
-                return format!(
-                    "git commit failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-            }
-            Err(e) => return format!("Failed to run git commit: {e}"),
-            _ => {}
-        }
-
-        match Command::new("git")
-            .args(["push", "origin", &branch])
-            .current_dir(&repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) if !o.status.success() => {
-                return format!(
-                    "git push failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-            }
-            Err(e) => return format!("Failed to run git push: {e}"),
-            _ => {}
-        }
-
+        // GitHub API → handler (needs octocrab)
         let parts: Vec<&str> = repo.splitn(2, '/').collect();
         if parts.len() != 2 {
             return format!("Invalid repo format (expected owner/repo): {repo}");
