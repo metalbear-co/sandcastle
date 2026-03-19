@@ -101,11 +101,11 @@ use axum::{
 };
 use tracing::debug;
 
-use super::SharedAuthState;
+use super::{RequestIdentity, SharedAuthState};
 
 pub async fn require_auth(
     Extension(auth): Extension<SharedAuthState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
     let token = request
@@ -113,21 +113,39 @@ pub async fn require_auth(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
+    let session_id = request
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("stateless")
+        .to_string();
 
     if auth.no_auth {
+        request.extensions_mut().insert(RequestIdentity {
+            owner_key: format!("no-auth:{session_id}"),
+            client_id: None,
+            no_auth: true,
+        });
         return next.run(request).await;
     }
 
     match token {
-        Some(t) if auth.valid_tokens.read().unwrap().contains_key(t) => {
-            debug!("auth: token accepted");
-            next.run(request).await
-        }
         Some(t) => {
-            debug!("auth: unknown token {t:.8}...");
-            (StatusCode::UNAUTHORIZED, [("WWW-Authenticate",
-                format!("Bearer realm=\"{base}\", resource_metadata=\"{base}/.well-known/oauth-protected-resource\"",
-                    base = auth.base_url))]).into_response()
+            let client_id = auth.valid_tokens.read().unwrap().get(t).cloned();
+            if let Some(client_id) = client_id {
+                request.extensions_mut().insert(RequestIdentity {
+                    owner_key: format!("client:{client_id}"),
+                    client_id: Some(client_id),
+                    no_auth: false,
+                });
+                debug!("auth: token accepted");
+                next.run(request).await
+            } else {
+                debug!("auth: unknown token {t:.8}...");
+                (StatusCode::UNAUTHORIZED, [("WWW-Authenticate",
+                    format!("Bearer realm=\"{base}\", resource_metadata=\"{base}/.well-known/oauth-protected-resource\"",
+                        base = auth.base_url))]).into_response()
+            }
         }
         None => {
             debug!("auth: no token");

@@ -28,7 +28,7 @@ use sandcastle_sandbox_providers::{
     Provider, daytona::DaytonaProvider, docker::DockerProvider, local::LocalProvider,
 };
 
-use handler::SandcastleHandler;
+use handler::{SandboxRegistry, SandcastleHandler};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,12 +48,22 @@ async fn main() -> Result<()> {
     let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
 
     let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
+    let no_github = std::env::var("SANDCASTLE_NO_GITHUB").is_ok();
 
     let stored_config = sandcastle_keychain::load_config();
 
-    let (octocrab, creds) = sandcastle_auth::github_auth::load_github_creds(&stored_config)?;
-    let creds = Arc::new(creds);
-    let password = sandcastle_auth::github_auth::load_sandcastle_password(&stored_config)?;
+    let (octocrab, creds) = if no_github {
+        info!("github integration: disabled (SANDCASTLE_NO_GITHUB is set)");
+        (None, None)
+    } else {
+        let (octocrab, creds) = sandcastle_auth::github_auth::load_github_creds(&stored_config)?;
+        (Some(octocrab), Some(Arc::new(creds)))
+    };
+    let password = if no_auth {
+        None
+    } else {
+        sandcastle_auth::github_auth::load_sandcastle_password(&stored_config)?
+    };
 
     let auth_state: SharedAuthState = Arc::new(AuthState {
         pending_codes: RwLock::new(HashMap::new()),
@@ -69,15 +79,17 @@ async fn main() -> Result<()> {
         info!("auth: password required to approve OAuth flow");
     }
 
-    if let Ok(token) = std::env::var("MCP_TOKEN") {
-        auth_state
-            .valid_tokens
-            .write()
-            .unwrap()
-            .insert(token, "env".to_string());
-        info!("auth: using pre-shared token from MCP_TOKEN");
-    } else {
-        info!("auth: open {base_url}/authorize to approve MCP access");
+    if !no_auth {
+        if let Ok(token) = std::env::var("MCP_TOKEN") {
+            auth_state
+                .valid_tokens
+                .write()
+                .unwrap()
+                .insert(token, "env".to_string());
+            info!("auth: using pre-shared token from MCP_TOKEN");
+        } else {
+            info!("auth: open {base_url}/authorize to approve MCP access");
+        }
     }
 
     let enabled = config::load_provider_selection()?;
@@ -122,11 +134,14 @@ async fn main() -> Result<()> {
         }
     }
 
+    let sandbox_registry = Arc::new(SandboxRegistry::default());
+
     let service = StreamableHttpService::new(
         move || {
             Ok(SandcastleHandler::new(
                 octocrab.clone(),
                 creds.clone(),
+                sandbox_registry.clone(),
                 providers.clone(),
             ))
         },

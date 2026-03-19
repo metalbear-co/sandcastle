@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 use anyhow::Result;
 use octocrab::{Octocrab, models::InstallationId};
@@ -15,6 +18,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 
+use sandcastle_auth::RequestIdentity;
 use sandcastle_auth::github_auth::GitHubCreds;
 use sandcastle_sandbox_providers::{Provider, SandboxHandle};
 
@@ -46,12 +50,20 @@ struct ListRepositoriesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CloneRepoParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
     #[schemars(description = "Owner/repo, e.g. \"octocat/Hello-World\"")]
     repo: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ReadFileParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
     #[schemars(description = "Absolute path to the file to read")]
     path: String,
     #[schemars(description = "1-indexed line number to start reading from (default: 1)")]
@@ -62,6 +74,10 @@ struct ReadFileParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WriteFileParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
     #[schemars(description = "Absolute path to the file to create or overwrite")]
     path: String,
     #[schemars(description = "Content to write (replaces existing content)")]
@@ -70,6 +86,10 @@ struct WriteFileParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct EditFileParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
     #[schemars(description = "Absolute path to the file to edit")]
     path: String,
     #[schemars(description = "Exact text to find — must appear exactly once in the file")]
@@ -80,6 +100,10 @@ struct EditFileParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GlobParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
     #[schemars(description = "Glob pattern, e.g. \"**/*.rs\" or \"src/*.toml\"")]
     pattern: String,
     #[schemars(description = "Base directory to search from (default: sandbox work_dir)")]
@@ -88,6 +112,10 @@ struct GlobParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GrepParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
     #[schemars(description = "Regex pattern to search for")]
     pattern: String,
     #[schemars(description = "File or directory to search (default: sandbox work_dir)")]
@@ -98,6 +126,10 @@ struct GrepParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RunCommandParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
     #[schemars(description = "Shell command to execute (runs via sh -c)")]
     command: String,
     #[schemars(description = "Directory to run the command in (default: sandbox work_dir)")]
@@ -106,6 +138,10 @@ struct RunCommandParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CreatePrParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
     #[schemars(description = "Owner/repo, e.g. \"octocat/Hello-World\"")]
     repo: String,
     #[schemars(description = "Name for the new branch")]
@@ -120,33 +156,154 @@ struct CreatePrParams {
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
+#[derive(Default)]
+pub struct SandboxRegistry {
+    owners: RwLock<HashMap<String, String>>,
+    active_by_owner: RwLock<HashMap<String, String>>,
+}
+
 #[derive(Clone)]
 pub struct SandcastleHandler {
     tool_router: ToolRouter<Self>,
-    octocrab: Arc<Octocrab>,
-    creds: Arc<GitHubCreds>,
-    sandbox: Arc<RwLock<Option<SandboxHandle>>>,
+    octocrab: Option<Arc<Octocrab>>,
+    creds: Option<Arc<GitHubCreds>>,
+    sandbox_registry: Arc<SandboxRegistry>,
     providers: Vec<Arc<dyn Provider>>,
 }
 
 #[tool_router]
 impl SandcastleHandler {
     pub fn new(
-        octocrab: Arc<Octocrab>,
-        creds: Arc<GitHubCreds>,
+        octocrab: Option<Arc<Octocrab>>,
+        creds: Option<Arc<GitHubCreds>>,
+        sandbox_registry: Arc<SandboxRegistry>,
         providers: Vec<Arc<dyn Provider>>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             octocrab,
             creds,
-            sandbox: Arc::new(RwLock::new(None)),
+            sandbox_registry,
             providers,
         }
     }
 
-    fn get_sandbox(&self) -> Option<SandboxHandle> {
-        self.sandbox.read().unwrap().clone()
+    fn request_identity(ctx: &RequestContext<RoleServer>) -> RequestIdentity {
+        ctx.extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<RequestIdentity>())
+            .cloned()
+            .unwrap_or_else(|| RequestIdentity {
+                owner_key: "anonymous".to_string(),
+                client_id: None,
+                no_auth: false,
+            })
+    }
+
+    fn set_active_sandbox(&self, identity: &RequestIdentity, sandbox_id: &str) {
+        self.sandbox_registry
+            .owners
+            .write()
+            .unwrap()
+            .insert(sandbox_id.to_string(), identity.owner_key.clone());
+        self.sandbox_registry
+            .active_by_owner
+            .write()
+            .unwrap()
+            .insert(identity.owner_key.clone(), sandbox_id.to_string());
+    }
+
+    fn is_owned_by(&self, identity: &RequestIdentity, sandbox_id: &str) -> bool {
+        if identity.no_auth {
+            // No-auth mode is only intended for local testing, so allow explicit sandbox IDs
+            // to survive session churn without enforcing ownership.
+            return true;
+        }
+        self.sandbox_registry
+            .owners
+            .read()
+            .unwrap()
+            .get(sandbox_id)
+            .is_some_and(|owner| owner == &identity.owner_key)
+    }
+
+    fn sandbox_summary_json(id: &str, name: &str, path: &str) -> String {
+        serde_json::json!({
+            "sandbox_id": id,
+            "name": name,
+            "work_dir": path,
+        })
+        .to_string()
+    }
+
+    fn error_json(message: &str) -> String {
+        serde_json::json!({
+            "error": message,
+        })
+        .to_string()
+    }
+
+    fn clear_sandbox_tracking(&self, sandbox_id: &str) {
+        self.sandbox_registry
+            .owners
+            .write()
+            .unwrap()
+            .remove(sandbox_id);
+        self.sandbox_registry
+            .active_by_owner
+            .write()
+            .unwrap()
+            .retain(|_, active_id| active_id != sandbox_id);
+    }
+
+    async fn resume_known_sandbox(&self, sandbox_id: &str) -> Result<SandboxHandle, String> {
+        for p in &self.providers {
+            if let Ok(handle) = p.resume(sandbox_id).await {
+                return Ok(handle);
+            }
+        }
+        self.clear_sandbox_tracking(sandbox_id);
+        Err(format!("Sandbox {sandbox_id} not found or has expired"))
+    }
+
+    async fn resolve_sandbox(
+        &self,
+        identity: &RequestIdentity,
+        sandbox_id: Option<&str>,
+    ) -> Result<SandboxHandle, String> {
+        let sandbox_id = match sandbox_id {
+            Some(id) => id.to_string(),
+            None => self
+                .sandbox_registry
+                .active_by_owner
+                .read()
+                .unwrap()
+                .get(&identity.owner_key)
+                .cloned()
+                .ok_or_else(|| {
+                    "Error: no sandbox active for this client. Call create_sandbox, \
+                     resume_sandbox, or pass sandbox_id."
+                        .to_string()
+                })?,
+        };
+
+        if !self.is_owned_by(identity, &sandbox_id) {
+            return Err(format!(
+                "Error: sandbox {sandbox_id} is not accessible to this client."
+            ));
+        }
+
+        self.resume_known_sandbox(&sandbox_id).await
+    }
+
+    fn github_enabled(&self) -> bool {
+        self.octocrab.is_some() && self.creds.is_some()
+    }
+
+    fn github_disabled_message(tool: &str) -> String {
+        format!(
+            "Error: {tool} requires GitHub integration. Restart Sandcastle without SANDCASTLE_NO_GITHUB, or provide GitHub credentials."
+        )
     }
 
     #[tool(description = "List available sandbox providers")]
@@ -160,53 +317,59 @@ impl SandcastleHandler {
     }
 
     #[tool(
-        description = "Spawn a sandbox with the given provider. Must be called before using any sandbox tools. Returns the sandbox ID which can be used later with resume_sandbox."
+        description = "Spawn a sandbox with the given provider. Must be called before using any sandbox tools. Returns JSON with sandbox_id, name, and work_dir."
     )]
     async fn create_sandbox(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(CreateSandboxParams { provider, name }): Parameters<CreateSandboxParams>,
     ) -> String {
+        let identity = Self::request_identity(&ctx);
         let p = self.providers.iter().find(|p| p.name() == provider);
         match p {
             None => {
                 let names: Vec<&str> = self.providers.iter().map(|p| p.name()).collect();
-                format!(
+                Self::error_json(&format!(
                     "Unknown provider: {provider}. Available: {}",
                     names.join(", ")
-                )
+                ))
             }
             Some(p) => match p.create(name).await {
-                Err(e) => e,
+                Err(e) => Self::error_json(&e),
                 Ok(handle) => {
                     let id = handle.id.clone();
                     let name = handle.name.clone();
                     let path = handle.work_dir.display().to_string();
-                    *self.sandbox.write().unwrap() = Some(handle);
-                    format!("Sandbox \"{name}\" created at {path} (id: {id})")
+                    self.set_active_sandbox(&identity, &id);
+                    Self::sandbox_summary_json(&id, &name, &path)
                 }
             },
         }
     }
 
     #[tool(
-        description = "Resume a previously created sandbox by ID. Use the ID returned by create_sandbox."
+        description = "Resume a previously created sandbox by ID. Use the ID returned by create_sandbox. Returns JSON with sandbox_id, name, and work_dir."
     )]
     async fn resume_sandbox(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(ResumeSandboxParams { id }): Parameters<ResumeSandboxParams>,
     ) -> String {
-        for p in &self.providers {
-            match p.resume(&id).await {
-                Ok(handle) => {
-                    let path = handle.work_dir.display().to_string();
-                    let name = handle.name.clone();
-                    *self.sandbox.write().unwrap() = Some(handle);
-                    return format!("Resumed sandbox \"{name}\" ({id}) at {path}");
-                }
-                Err(_) => continue,
-            }
+        let identity = Self::request_identity(&ctx);
+        if !self.is_owned_by(&identity, &id) {
+            return Self::error_json(&format!(
+                "Error: sandbox {id} is not accessible to this client."
+            ));
         }
-        format!("Sandbox {id} not found or has expired")
+        match self.resume_known_sandbox(&id).await {
+            Ok(handle) => {
+                let path = handle.work_dir.display().to_string();
+                let name = handle.name.clone();
+                self.set_active_sandbox(&identity, &id);
+                Self::sandbox_summary_json(&id, &name, &path)
+            }
+            Err(e) => Self::error_json(&e),
+        }
     }
 
     #[tool(
@@ -216,9 +379,11 @@ impl SandcastleHandler {
         &self,
         Parameters(ListRepositoriesParams { page, query }): Parameters<ListRepositoriesParams>,
     ) -> String {
+        let Some(octocrab) = &self.octocrab else {
+            return Self::github_disabled_message("list_repositories");
+        };
         let page_num = page.unwrap_or(1);
-        match self
-            .octocrab
+        match octocrab
             .current()
             .list_repos_for_authenticated_user()
             .sort("pushed")
@@ -251,18 +416,23 @@ impl SandcastleHandler {
     }
 
     #[tool(
-        description = "Clone a GitHub repository into the active sandbox. Returns the local path."
+        description = "Clone a GitHub repository into a sandbox. Pass sandbox_id when working with multiple sandboxes or clients. Returns the local path."
     )]
     async fn clone_repository(
         &self,
-        Parameters(CloneRepoParams { repo }): Parameters<CloneRepoParams>,
+        ctx: RequestContext<RoleServer>,
+        Parameters(CloneRepoParams { sandbox_id, repo }): Parameters<CloneRepoParams>,
     ) -> String {
-        let sandbox = match self.get_sandbox() {
-            Some(s) => s,
-            None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
+        let identity = Self::request_identity(&ctx);
+        let Some(creds) = &self.creds else {
+            return Self::github_disabled_message("clone_repository");
+        };
+        let sandbox = match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Ok(s) => s,
+            Err(e) => return e,
         };
 
-        let auth_url = match self.creds.as_ref() {
+        let auth_url = match creds.as_ref() {
             GitHubCreds::PersonalToken { token, user } => {
                 format!("https://{user}:{token}@github.com/{repo}.git")
             }
@@ -294,15 +464,18 @@ impl SandcastleHandler {
     )]
     async fn read_file(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(ReadFileParams {
+            sandbox_id,
             path,
             offset,
             limit,
         }): Parameters<ReadFileParams>,
     ) -> String {
-        match self.get_sandbox() {
-            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
-            Some(s) => s.read_file(&path, offset, limit).await,
+        let identity = Self::request_identity(&ctx);
+        match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Err(e) => e,
+            Ok(s) => s.read_file(&path, offset, limit).await,
         }
     }
 
@@ -311,11 +484,17 @@ impl SandcastleHandler {
     )]
     async fn write_file(
         &self,
-        Parameters(WriteFileParams { path, content }): Parameters<WriteFileParams>,
+        ctx: RequestContext<RoleServer>,
+        Parameters(WriteFileParams {
+            sandbox_id,
+            path,
+            content,
+        }): Parameters<WriteFileParams>,
     ) -> String {
-        match self.get_sandbox() {
-            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
-            Some(s) => s.write_file(&path, &content).await,
+        let identity = Self::request_identity(&ctx);
+        match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Err(e) => e,
+            Ok(s) => s.write_file(&path, &content).await,
         }
     }
 
@@ -324,15 +503,18 @@ impl SandcastleHandler {
     )]
     async fn edit_file(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(EditFileParams {
+            sandbox_id,
             path,
             old_string,
             new_string,
         }): Parameters<EditFileParams>,
     ) -> String {
-        match self.get_sandbox() {
-            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
-            Some(s) => s.edit_file(&path, &old_string, &new_string).await,
+        let identity = Self::request_identity(&ctx);
+        match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Err(e) => e,
+            Ok(s) => s.edit_file(&path, &old_string, &new_string).await,
         }
     }
 
@@ -341,11 +523,17 @@ impl SandcastleHandler {
     )]
     async fn glob(
         &self,
-        Parameters(GlobParams { pattern, path }): Parameters<GlobParams>,
+        ctx: RequestContext<RoleServer>,
+        Parameters(GlobParams {
+            sandbox_id,
+            pattern,
+            path,
+        }): Parameters<GlobParams>,
     ) -> String {
-        match self.get_sandbox() {
-            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
-            Some(s) => s.glob(&pattern, path).await,
+        let identity = Self::request_identity(&ctx);
+        match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Err(e) => e,
+            Ok(s) => s.glob(&pattern, path).await,
         }
     }
 
@@ -354,15 +542,18 @@ impl SandcastleHandler {
     )]
     async fn grep(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(GrepParams {
+            sandbox_id,
             pattern,
             path,
             include,
         }): Parameters<GrepParams>,
     ) -> String {
-        match self.get_sandbox() {
-            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
-            Some(s) => s.grep(&pattern, path, include).await,
+        let identity = Self::request_identity(&ctx);
+        match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Err(e) => e,
+            Ok(s) => s.grep(&pattern, path, include).await,
         }
     }
 
@@ -371,11 +562,17 @@ impl SandcastleHandler {
     )]
     async fn run_command(
         &self,
-        Parameters(RunCommandParams { command, dir }): Parameters<RunCommandParams>,
+        ctx: RequestContext<RoleServer>,
+        Parameters(RunCommandParams {
+            sandbox_id,
+            command,
+            dir,
+        }): Parameters<RunCommandParams>,
     ) -> String {
-        match self.get_sandbox() {
-            None => "Error: no sandbox active. Call create_sandbox first.".to_string(),
-            Some(s) => s.run_command(&command, dir).await,
+        let identity = Self::request_identity(&ctx);
+        match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Err(e) => e,
+            Ok(s) => s.run_command(&command, dir).await,
         }
     }
 
@@ -384,7 +581,9 @@ impl SandcastleHandler {
     )]
     async fn create_pr(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(CreatePrParams {
+            sandbox_id,
             repo,
             branch,
             commit_message,
@@ -392,9 +591,13 @@ impl SandcastleHandler {
             pr_body,
         }): Parameters<CreatePrParams>,
     ) -> String {
-        let sandbox = match self.get_sandbox() {
-            Some(s) => s,
-            None => return "Error: no sandbox active. Call create_sandbox first.".to_string(),
+        let identity = Self::request_identity(&ctx);
+        let Some(octocrab) = &self.octocrab else {
+            return Self::github_disabled_message("create_pr");
+        };
+        let sandbox = match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Ok(s) => s,
+            Err(e) => return e,
         };
 
         // Git work → sandbox
@@ -412,8 +615,7 @@ impl SandcastleHandler {
         }
         let (owner, repo_name) = (parts[0], parts[1]);
 
-        match self
-            .octocrab
+        match octocrab
             .pulls(owner, repo_name)
             .create(&pr_title, &branch, "main")
             .body(&pr_body)
@@ -433,29 +635,39 @@ impl SandcastleHandler {
 
 impl ServerHandler for SandcastleHandler {
     fn get_info(&self) -> ServerInfo {
+        let github_note = if self.github_enabled() {
+            "GitHub integration is enabled, so list_repositories, clone_repository, and create_pr are available for repository workflows. "
+        } else {
+            "GitHub integration is disabled, so list_repositories, clone_repository, and create_pr are unavailable in this session. "
+        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Sandcastle MCP server. \
-                IMPORTANT: All file operations, git commands, and shell commands MUST be performed \
-                using the tools provided by this server (clone_repository, read_file, write_file, \
-                edit_file, glob, grep, run_command, create_pr). Do NOT use your own built-in tools \
+                format!(
+                    "Sandcastle MCP server. \
+                IMPORTANT: All file operations and shell commands MUST be performed \
+                using the tools provided by this server (read_file, write_file, \
+                edit_file, glob, grep, run_command). Do NOT use your own built-in tools \
                 or shell access for any of these tasks — always delegate to the sandbox tools. \
                 Workflow: call create_sandbox first, then use the sandbox tools for everything else. \
-                list_repositories and list_providers are available before creating a sandbox. \
+                When a client manages multiple sandboxes or loses session continuity, pass sandbox_id explicitly to sandbox tools. \
+                list_providers is available before creating a sandbox. \
+                {github_note}\
                 \n\nSandbox isolation: read_file, write_file, and edit_file are restricted to paths \
-                within the active sandbox directory. Always use paths under the sandbox work_dir \
+                within the selected sandbox directory. Always use paths under the sandbox work_dir \
                 (returned by create_sandbox). This applies to ALL file operations including plan \
                 files — when asked to write or read a plan file, write it to a path inside the \
                 sandbox (e.g. <sandbox_work_dir>/plan.md) and read it back from there.\
                 \n\nTool reference:\
-                \n- create_sandbox(provider, name): create a sandbox; when calling, choose a short descriptive name that reflects the current task (e.g. \"fix-login-bug\", \"add-export-feature\"). If no obvious name exists, ask the user before proceeding.\
+                \n- create_sandbox(provider, name): create a sandbox and return JSON with sandbox_id, name, and work_dir; when calling, choose a short descriptive name that reflects the current task (e.g. \"fix-login-bug\", \"add-export-feature\"). If no obvious name exists, ask the user before proceeding.\
+                \n- resume_sandbox(id): resume a sandbox by ID and return JSON with sandbox_id, name, and work_dir\
+                \n- sandbox tools accept an optional sandbox_id; provide it explicitly for multi-sandbox workflows\
                 \n- read_file(path, offset?, limit?): read a file within the sandbox; offset/limit for line ranges with line numbers\
                 \n- write_file(path, content): create or overwrite a file within the sandbox\
                 \n- edit_file(path, old_string, new_string): targeted search-replace within a sandbox file\
                 \n- glob(pattern, path?): find files matching a glob pattern (e.g. **/*.rs)\
                 \n- grep(pattern, path?, include?): search file contents with regex\
-                \n- run_command(command, dir?): run a shell command (dir defaults to sandbox root)"
-                    .to_string(),
+                \n- run_command(command, dir?): run a shell command (dir defaults to sandbox root)",
+                )
             )
     }
 
@@ -464,7 +676,18 @@ impl ServerHandler for SandcastleHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let tools = self.tool_router.list_all();
+        let tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|tool| {
+                self.github_enabled()
+                    || !matches!(
+                        tool.name.as_ref(),
+                        "list_repositories" | "clone_repository" | "create_pr"
+                    )
+            })
+            .collect::<Vec<_>>();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         tracing::info!(tools = ?names, "list_tools");
         Ok(ListToolsResult {
