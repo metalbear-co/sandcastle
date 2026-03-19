@@ -25,24 +25,6 @@ use sandcastle_util::generate_token;
 
 const WORK_DIR: &str = "/workspace";
 
-// ── path helpers ──────────────────────────────────────────────────────────────
-
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut out: Vec<std::path::Component> = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if matches!(out.last(), Some(std::path::Component::Normal(_))) {
-                    out.pop();
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.iter().collect()
-}
-
 // ── DockerSandbox ─────────────────────────────────────────────────────────────
 
 struct ExecResult {
@@ -66,17 +48,6 @@ struct DockerSandbox {
 }
 
 impl DockerSandbox {
-    fn ensure_in_sandbox(&self, path: &str) -> Result<(), String> {
-        let normalized = lexical_normalize(Path::new(path));
-        if !normalized.starts_with(WORK_DIR) {
-            return Err(format!(
-                "Error: path {path} is outside the sandbox ({WORK_DIR}). \
-                 File operations are restricted to the sandbox directory."
-            ));
-        }
-        Ok(())
-    }
-
     async fn exec_cmd(
         &self,
         cmd: &[&str],
@@ -154,9 +125,6 @@ impl DockerSandbox {
     }
 
     async fn read_file(&self, path: &str, offset: Option<u32>, limit: Option<u32>) -> String {
-        if let Err(e) = self.ensure_in_sandbox(path) {
-            return e;
-        }
         let script = if offset.is_none() && limit.is_none() {
             format!("cat -- '{path}'")
         } else {
@@ -188,9 +156,6 @@ impl DockerSandbox {
     }
 
     async fn write_file(&self, path: &str, content: &str) -> String {
-        if let Err(e) = self.ensure_in_sandbox(path) {
-            return e;
-        }
         // Create parent dirs
         if let Some(parent) = Path::new(path).parent() {
             let mkdir = format!("mkdir -p -- '{}'", parent.display());
@@ -213,9 +178,6 @@ impl DockerSandbox {
     }
 
     async fn edit_file(&self, path: &str, old_string: &str, new_string: &str) -> String {
-        if let Err(e) = self.ensure_in_sandbox(path) {
-            return e;
-        }
         let read_cmd = format!("cat -- '{path}'");
         let content = match self
             .exec_cmd(&["sh", "-c", &read_cmd], None, None, None)
@@ -303,9 +265,6 @@ impl DockerSandbox {
 
     async fn run_command(&self, command: &str, dir: Option<String>) -> String {
         let work_dir = dir.as_deref().unwrap_or(WORK_DIR);
-        if let Err(e) = self.ensure_in_sandbox(work_dir) {
-            return e;
-        }
         match self
             .exec_cmd(&["sh", "-c", command], None, Some(work_dir), None)
             .await

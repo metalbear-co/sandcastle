@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -17,25 +17,7 @@ use sandcastle_util::generate_token;
 
 const WORK_DIR: &str = "/home/user";
 
-// ── path helpers ──────────────────────────────────────────────────────────────
-
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut out: Vec<std::path::Component> = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if matches!(out.last(), Some(std::path::Component::Normal(_))) {
-                    out.pop();
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.iter().collect()
-}
-
-// ── DaytoanSandbox ────────────────────────────────────────────────────────────
+// ── Daytona Sandbox ───────────────────────────────────────────────────────────
 
 struct ExecResult {
     exit_code: i32,
@@ -48,23 +30,12 @@ impl ExecResult {
     }
 }
 
-struct DaytoanSandbox {
+struct DaytonaSandbox {
     sandbox_id: Uuid,
     client: Arc<DaytonaClient>,
 }
 
-impl DaytoanSandbox {
-    fn ensure_in_sandbox(&self, path: &str) -> Result<(), String> {
-        let normalized = lexical_normalize(Path::new(path));
-        if !normalized.starts_with(WORK_DIR) {
-            return Err(format!(
-                "Error: path {path} is outside the sandbox ({WORK_DIR}). \
-                 File operations are restricted to the sandbox directory."
-            ));
-        }
-        Ok(())
-    }
-
+impl DaytonaSandbox {
     async fn exec(&self, command: &str, cwd: Option<&str>) -> Result<ExecResult, String> {
         let req = ExecuteRequest {
             command: command.to_string(),
@@ -83,9 +54,6 @@ impl DaytoanSandbox {
     }
 
     async fn read_file(&self, path: &str, offset: Option<u32>, limit: Option<u32>) -> String {
-        if let Err(e) = self.ensure_in_sandbox(path) {
-            return e;
-        }
         match self
             .client
             .files()
@@ -115,9 +83,6 @@ impl DaytoanSandbox {
     }
 
     async fn write_file(&self, path: &str, content: &str) -> String {
-        if let Err(e) = self.ensure_in_sandbox(path) {
-            return e;
-        }
         match self
             .client
             .files()
@@ -130,9 +95,6 @@ impl DaytoanSandbox {
     }
 
     async fn edit_file(&self, path: &str, old_string: &str, new_string: &str) -> String {
-        if let Err(e) = self.ensure_in_sandbox(path) {
-            return e;
-        }
         let content = match self
             .client
             .files()
@@ -207,9 +169,6 @@ impl DaytoanSandbox {
 
     async fn run_command(&self, command: &str, dir: Option<String>) -> String {
         let work_dir = dir.as_deref().unwrap_or(WORK_DIR);
-        if let Err(e) = self.ensure_in_sandbox(work_dir) {
-            return e;
-        }
         match self.exec(command, Some(work_dir)).await {
             Ok(r) => r.to_command_output(),
             Err(e) => format!("Failed to run command: {e}"),
@@ -395,7 +354,7 @@ impl Provider for DaytonaProvider {
         let handle = SandboxHandle::new(id.clone(), name, work_dir, tx);
 
         tokio::spawn(
-            DaytoanSandbox {
+            DaytonaSandbox {
                 sandbox_id: sandbox.id,
                 client: Arc::clone(&self.client),
             }
