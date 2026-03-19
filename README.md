@@ -1,5 +1,7 @@
 # Sandcastle
 
+HELLO
+
 An MCP server that gives AI agents access to sandboxed environments.
 
 ## The Idea
