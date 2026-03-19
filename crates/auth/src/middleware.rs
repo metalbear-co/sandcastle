@@ -124,6 +124,7 @@ pub async fn require_auth(
         request.extensions_mut().insert(RequestIdentity {
             owner_key: format!("no-auth:{session_id}"),
             client_id: None,
+            no_auth: true,
         });
         return next.run(request).await;
     }
@@ -135,6 +136,7 @@ pub async fn require_auth(
                 request.extensions_mut().insert(RequestIdentity {
                     owner_key: format!("client:{client_id}"),
                     client_id: Some(client_id),
+                    no_auth: false,
                 });
                 debug!("auth: token accepted");
                 next.run(request).await

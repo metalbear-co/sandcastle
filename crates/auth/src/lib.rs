@@ -29,6 +29,7 @@ pub struct AuthState {
 pub struct RequestIdentity {
     pub owner_key: String,
     pub client_id: Option<String>,
+    pub no_auth: bool,
 }
 
 pub type SharedAuthState = Arc<AuthState>;

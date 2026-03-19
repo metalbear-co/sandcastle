@@ -196,6 +196,7 @@ impl SandcastleHandler {
             .unwrap_or_else(|| RequestIdentity {
                 owner_key: "anonymous".to_string(),
                 client_id: None,
+                no_auth: false,
             })
     }
 
@@ -213,12 +214,33 @@ impl SandcastleHandler {
     }
 
     fn is_owned_by(&self, identity: &RequestIdentity, sandbox_id: &str) -> bool {
+        if identity.no_auth {
+            // No-auth mode is only intended for local testing, so allow explicit sandbox IDs
+            // to survive session churn without enforcing ownership.
+            return true;
+        }
         self.sandbox_registry
             .owners
             .read()
             .unwrap()
             .get(sandbox_id)
             .is_some_and(|owner| owner == &identity.owner_key)
+    }
+
+    fn sandbox_summary_json(id: &str, name: &str, path: &str) -> String {
+        serde_json::json!({
+            "sandbox_id": id,
+            "name": name,
+            "work_dir": path,
+        })
+        .to_string()
+    }
+
+    fn error_json(message: &str) -> String {
+        serde_json::json!({
+            "error": message,
+        })
+        .to_string()
     }
 
     fn clear_sandbox_tracking(&self, sandbox_id: &str) {
@@ -295,7 +317,7 @@ impl SandcastleHandler {
     }
 
     #[tool(
-        description = "Spawn a sandbox with the given provider. Must be called before using any sandbox tools. Returns the sandbox ID which can be used later with resume_sandbox."
+        description = "Spawn a sandbox with the given provider. Must be called before using any sandbox tools. Returns JSON with sandbox_id, name, and work_dir."
     )]
     async fn create_sandbox(
         &self,
@@ -307,26 +329,26 @@ impl SandcastleHandler {
         match p {
             None => {
                 let names: Vec<&str> = self.providers.iter().map(|p| p.name()).collect();
-                format!(
+                Self::error_json(&format!(
                     "Unknown provider: {provider}. Available: {}",
                     names.join(", ")
-                )
+                ))
             }
             Some(p) => match p.create(name).await {
-                Err(e) => e,
+                Err(e) => Self::error_json(&e),
                 Ok(handle) => {
                     let id = handle.id.clone();
                     let name = handle.name.clone();
                     let path = handle.work_dir.display().to_string();
                     self.set_active_sandbox(&identity, &id);
-                    format!("Sandbox \"{name}\" created at {path} (id: {id})")
+                    Self::sandbox_summary_json(&id, &name, &path)
                 }
             },
         }
     }
 
     #[tool(
-        description = "Resume a previously created sandbox by ID. Use the ID returned by create_sandbox."
+        description = "Resume a previously created sandbox by ID. Use the ID returned by create_sandbox. Returns JSON with sandbox_id, name, and work_dir."
     )]
     async fn resume_sandbox(
         &self,
@@ -335,16 +357,18 @@ impl SandcastleHandler {
     ) -> String {
         let identity = Self::request_identity(&ctx);
         if !self.is_owned_by(&identity, &id) {
-            return format!("Error: sandbox {id} is not accessible to this client.");
+            return Self::error_json(&format!(
+                "Error: sandbox {id} is not accessible to this client."
+            ));
         }
         match self.resume_known_sandbox(&id).await {
             Ok(handle) => {
                 let path = handle.work_dir.display().to_string();
                 let name = handle.name.clone();
                 self.set_active_sandbox(&identity, &id);
-                format!("Resumed sandbox \"{name}\" ({id}) at {path}")
+                Self::sandbox_summary_json(&id, &name, &path)
             }
-            Err(e) => e,
+            Err(e) => Self::error_json(&e),
         }
     }
 
@@ -611,31 +635,39 @@ impl SandcastleHandler {
 
 impl ServerHandler for SandcastleHandler {
     fn get_info(&self) -> ServerInfo {
+        let github_note = if self.github_enabled() {
+            "GitHub integration is enabled, so list_repositories, clone_repository, and create_pr are available for repository workflows. "
+        } else {
+            "GitHub integration is disabled, so list_repositories, clone_repository, and create_pr are unavailable in this session. "
+        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Sandcastle MCP server. \
-                IMPORTANT: All file operations, git commands, and shell commands MUST be performed \
-                using the tools provided by this server (clone_repository, read_file, write_file, \
-                edit_file, glob, grep, run_command, create_pr). Do NOT use your own built-in tools \
+                format!(
+                    "Sandcastle MCP server. \
+                IMPORTANT: All file operations and shell commands MUST be performed \
+                using the tools provided by this server (read_file, write_file, \
+                edit_file, glob, grep, run_command). Do NOT use your own built-in tools \
                 or shell access for any of these tasks — always delegate to the sandbox tools. \
                 Workflow: call create_sandbox first, then use the sandbox tools for everything else. \
                 When a client manages multiple sandboxes or loses session continuity, pass sandbox_id explicitly to sandbox tools. \
-                list_repositories and list_providers are available before creating a sandbox. \
+                list_providers is available before creating a sandbox. \
+                {github_note}\
                 \n\nSandbox isolation: read_file, write_file, and edit_file are restricted to paths \
                 within the selected sandbox directory. Always use paths under the sandbox work_dir \
                 (returned by create_sandbox). This applies to ALL file operations including plan \
                 files — when asked to write or read a plan file, write it to a path inside the \
                 sandbox (e.g. <sandbox_work_dir>/plan.md) and read it back from there.\
                 \n\nTool reference:\
-                \n- create_sandbox(provider, name): create a sandbox; when calling, choose a short descriptive name that reflects the current task (e.g. \"fix-login-bug\", \"add-export-feature\"). If no obvious name exists, ask the user before proceeding.\
+                \n- create_sandbox(provider, name): create a sandbox and return JSON with sandbox_id, name, and work_dir; when calling, choose a short descriptive name that reflects the current task (e.g. \"fix-login-bug\", \"add-export-feature\"). If no obvious name exists, ask the user before proceeding.\
+                \n- resume_sandbox(id): resume a sandbox by ID and return JSON with sandbox_id, name, and work_dir\
                 \n- sandbox tools accept an optional sandbox_id; provide it explicitly for multi-sandbox workflows\
                 \n- read_file(path, offset?, limit?): read a file within the sandbox; offset/limit for line ranges with line numbers\
                 \n- write_file(path, content): create or overwrite a file within the sandbox\
                 \n- edit_file(path, old_string, new_string): targeted search-replace within a sandbox file\
                 \n- glob(pattern, path?): find files matching a glob pattern (e.g. **/*.rs)\
                 \n- grep(pattern, path?, include?): search file contents with regex\
-                \n- run_command(command, dir?): run a shell command (dir defaults to sandbox root)"
-                    .to_string(),
+                \n- run_command(command, dir?): run a shell command (dir defaults to sandbox root)",
+                )
             )
     }
 
