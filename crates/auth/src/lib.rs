@@ -25,6 +25,12 @@ pub struct AuthState {
     pub password: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RequestIdentity {
+    pub owner_key: String,
+    pub client_id: Option<String>,
+}
+
 pub type SharedAuthState = Arc<AuthState>;
 
 /// Load any tokens persisted from a previous run.
