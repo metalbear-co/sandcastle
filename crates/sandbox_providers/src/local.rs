@@ -193,8 +193,13 @@ impl LocalSandbox {
         results.join("\n")
     }
 
-    #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
-    async fn run_command(&self, command: &str, dir: Option<String>) -> String {
+    #[tracing::instrument(skip(self, env), fields(sandbox = %self.id))]
+    async fn run_command(
+        &self,
+        command: &str,
+        dir: Option<String>,
+        env: std::collections::HashMap<String, String>,
+    ) -> String {
         let work_dir = dir.unwrap_or_else(|| self.work_dir.display().to_string());
         if let Err(e) = self.ensure_in_sandbox(&work_dir) {
             return e;
@@ -203,6 +208,7 @@ impl LocalSandbox {
             .arg("-c")
             .arg(command)
             .current_dir(&work_dir)
+            .envs(&env)
             .output()
             .await
         {
@@ -216,95 +222,6 @@ impl LocalSandbox {
             }
             Err(e) => format!("Failed to run command: {e}"),
         }
-    }
-
-    #[tracing::instrument(skip(self, url), fields(sandbox = %self.id))]
-    async fn clone_repository(&self, repo: &str, url: &str) -> String {
-        let dest = self.work_dir.join(repo);
-
-        if dest.exists() {
-            return format!("Already cloned at {}", dest.display());
-        }
-
-        if let Some(parent) = dest.parent()
-            && let Err(e) = tokio::fs::create_dir_all(parent).await
-        {
-            return format!("Failed to create directory: {e}");
-        }
-
-        match Command::new("git")
-            .args(["clone", url, dest.to_str().unwrap()])
-            .output()
-            .await
-        {
-            Ok(o) if o.status.success() => format!("Cloned to {}", dest.display()),
-            Ok(o) => format!("git clone failed: {}", String::from_utf8_lossy(&o.stderr)),
-            Err(e) => format!("Failed to run git: {e}"),
-        }
-    }
-
-    #[tracing::instrument(skip(self), fields(sandbox = %self.id))]
-    async fn git_commit_and_push(&self, repo: &str, branch: &str, commit_message: &str) -> String {
-        let repo_dir = self.work_dir.join(repo);
-
-        for args in &[
-            vec!["config", "user.email", "sandcastle@localhost"],
-            vec!["config", "user.name", "sandcastle"],
-        ] {
-            let _ = Command::new("git")
-                .args(args)
-                .current_dir(&repo_dir)
-                .output()
-                .await;
-        }
-
-        let checkout = Command::new("git")
-            .args(["checkout", "-b", branch])
-            .current_dir(&repo_dir)
-            .output()
-            .await;
-        if let Err(e) = checkout {
-            return format!("Failed to create branch: {e}");
-        }
-
-        let add = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(&repo_dir)
-            .output()
-            .await;
-        if let Ok(o) = &add
-            && !o.status.success()
-        {
-            return format!("git add failed: {}", String::from_utf8_lossy(&o.stderr));
-        }
-
-        match Command::new("git")
-            .args(["commit", "-m", commit_message])
-            .current_dir(&repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) if !o.status.success() => {
-                return format!("git commit failed: {}", String::from_utf8_lossy(&o.stderr));
-            }
-            Err(e) => return format!("Failed to run git commit: {e}"),
-            _ => {}
-        }
-
-        match Command::new("git")
-            .args(["push", "origin", branch])
-            .current_dir(&repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) if !o.status.success() => {
-                return format!("git push failed: {}", String::from_utf8_lossy(&o.stderr));
-            }
-            Err(e) => return format!("Failed to run git push: {e}"),
-            _ => {}
-        }
-
-        "ok".to_string()
     }
 
     pub async fn run(self, mut rx: mpsc::Receiver<SandboxMessage>) {
@@ -351,23 +268,10 @@ impl LocalSandbox {
                 SandboxMessage::RunCommand {
                     command,
                     dir,
+                    env,
                     reply,
                 } => {
-                    let _ = reply.send(self.run_command(&command, dir).await);
-                }
-                SandboxMessage::CloneRepository { repo, url, reply } => {
-                    let _ = reply.send(self.clone_repository(&repo, &url).await);
-                }
-                SandboxMessage::GitCommitAndPush {
-                    repo,
-                    branch,
-                    commit_message,
-                    reply,
-                } => {
-                    let _ = reply.send(
-                        self.git_commit_and_push(&repo, &branch, &commit_message)
-                            .await,
-                    );
+                    let _ = reply.send(self.run_command(&command, dir, env).await);
                 }
             }
         }

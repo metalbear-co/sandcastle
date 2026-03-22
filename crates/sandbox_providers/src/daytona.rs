@@ -40,9 +40,11 @@ impl DaytonaSandbox {
         let req = ExecuteRequest {
             command: command.to_string(),
             cwd: cwd.map(|s| s.to_string()),
-            timeout: Some(60_000), // milliseconds
+            timeout: Some(30),
         };
-        self.client
+        tracing::debug!(sandbox_id = %self.sandbox_id, cmd = command, cwd = ?cwd, "daytona exec");
+        let result = self
+            .client
             .process()
             .execute_with_options(&self.sandbox_id, req)
             .await
@@ -50,7 +52,14 @@ impl DaytonaSandbox {
                 exit_code: r.exit_code,
                 result: r.result,
             })
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        match &result {
+            Ok(r) => {
+                tracing::debug!(exit_code = r.exit_code, output = %r.result, "daytona exec result")
+            }
+            Err(e) => tracing::warn!(error = %e, "daytona exec failed"),
+        }
+        result
     }
 
     async fn read_file(&self, path: &str, offset: Option<u32>, limit: Option<u32>) -> String {
@@ -167,40 +176,24 @@ impl DaytonaSandbox {
         }
     }
 
-    async fn run_command(&self, command: &str, dir: Option<String>) -> String {
-        let work_dir = dir.as_deref().unwrap_or(WORK_DIR);
-        match self.exec(command, Some(work_dir)).await {
+    async fn run_command(
+        &self,
+        command: &str,
+        dir: Option<String>,
+        env: std::collections::HashMap<String, String>,
+    ) -> String {
+        let full_command = if env.is_empty() {
+            command.to_string()
+        } else {
+            let prefix: String = env
+                .iter()
+                .map(|(k, v)| format!("{}={} ", shell_escape(k), shell_escape(v)))
+                .collect();
+            format!("{prefix}{command}")
+        };
+        match self.exec(&full_command, dir.as_deref()).await {
             Ok(r) => r.to_command_output(),
             Err(e) => format!("Failed to run command: {e}"),
-        }
-    }
-
-    async fn clone_repository(&self, repo: &str, url: &str) -> String {
-        let dest = format!("{WORK_DIR}/{repo}");
-        let script = format!(
-            "[ -d '{dest}' ] && echo 'Already cloned at {dest}' || git clone '{url}' '{dest}'"
-        );
-        match self.exec(&script, Some(WORK_DIR)).await {
-            Ok(r) if r.exit_code == 0 => r.result,
-            Ok(r) => format!("git clone failed: {}", r.result),
-            Err(e) => format!("Failed to run git: {e}"),
-        }
-    }
-
-    async fn git_commit_and_push(&self, repo: &str, branch: &str, commit_message: &str) -> String {
-        let repo_dir = format!("{WORK_DIR}/{repo}");
-        let script = format!(
-            "git config user.email sandcastle@localhost && \
-             git config user.name sandcastle && \
-             git checkout -b '{branch}' && \
-             git add -A && \
-             git commit -m '{commit_message}' && \
-             git push origin '{branch}'"
-        );
-        match self.exec(&script, Some(&repo_dir)).await {
-            Ok(r) if r.exit_code == 0 => "ok".to_string(),
-            Ok(r) => format!("git operation failed: {}", r.result),
-            Err(e) => format!("Failed to run git: {e}"),
         }
     }
 
@@ -248,27 +241,18 @@ impl DaytonaSandbox {
                 SandboxMessage::RunCommand {
                     command,
                     dir,
+                    env,
                     reply,
                 } => {
-                    let _ = reply.send(self.run_command(&command, dir).await);
-                }
-                SandboxMessage::CloneRepository { repo, url, reply } => {
-                    let _ = reply.send(self.clone_repository(&repo, &url).await);
-                }
-                SandboxMessage::GitCommitAndPush {
-                    repo,
-                    branch,
-                    commit_message,
-                    reply,
-                } => {
-                    let _ = reply.send(
-                        self.git_commit_and_push(&repo, &branch, &commit_message)
-                            .await,
-                    );
+                    let _ = reply.send(self.run_command(&command, dir, env).await);
                 }
             }
         }
     }
+}
+
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 // ── DaytonaProvider ───────────────────────────────────────────────────────────

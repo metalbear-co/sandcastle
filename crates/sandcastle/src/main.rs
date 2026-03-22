@@ -1,5 +1,7 @@
 mod config;
 mod handler;
+mod secret_routes;
+mod secrets;
 
 use std::{
     collections::HashMap,
@@ -29,6 +31,8 @@ use sandcastle_sandbox_providers::{
 };
 
 use handler::{SandboxRegistry, SandcastleHandler};
+use secret_routes::BaseUrl;
+use secrets::SecretStore;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,17 +52,9 @@ async fn main() -> Result<()> {
     let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
 
     let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
-    let no_github = std::env::var("SANDCASTLE_NO_GITHUB").is_ok();
 
     let stored_config = sandcastle_keychain::load_config();
 
-    let (octocrab, creds) = if no_github {
-        info!("github integration: disabled (SANDCASTLE_NO_GITHUB is set)");
-        (None, None)
-    } else {
-        let (octocrab, creds) = sandcastle_auth::github_auth::load_github_creds(&stored_config)?;
-        (Some(octocrab), Some(Arc::new(creds)))
-    };
     let password = if no_auth {
         None
     } else {
@@ -92,7 +88,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    let enabled = config::load_provider_selection()?;
+    let mut enabled = config::load_provider_selection()?;
+    if std::env::var("DAYTONA_API_KEY").is_ok() && !enabled.contains(&"daytona".to_string()) {
+        enabled.push("daytona".to_string());
+    }
 
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
 
@@ -135,22 +134,27 @@ async fn main() -> Result<()> {
     }
 
     let sandbox_registry = Arc::new(SandboxRegistry::default());
+    let secret_store = SecretStore::new();
 
     let service = StreamableHttpService::new(
-        move || {
-            Ok(SandcastleHandler::new(
-                octocrab.clone(),
-                creds.clone(),
-                sandbox_registry.clone(),
-                providers.clone(),
-            ))
+        {
+            let secret_store = secret_store.clone();
+            let base_url = base_url.clone();
+            move || {
+                Ok(SandcastleHandler::new(
+                    sandbox_registry.clone(),
+                    providers.clone(),
+                    secret_store.clone(),
+                    base_url.clone(),
+                ))
+            }
         },
         LocalSessionManager::default().into(),
         Default::default(),
     );
 
     // route_layer applies middleware only to routes defined before it,
-    // so /authorize, /token, and /.well-known/* remain unauthenticated.
+    // so /authorize, /token, /.well-known/*, and /secrets/* remain unauthenticated.
     let app = Router::new()
         .route_service("/", service)
         .route_layer(middleware::from_fn(require_auth))
@@ -166,6 +170,12 @@ async fn main() -> Result<()> {
         .route("/authorize/approve", post(authorize_approve))
         .route("/token", post(token_endpoint))
         .route("/register", post(register_client))
+        .route(
+            "/secrets/{token}",
+            get(secret_routes::get_secret_page).post(secret_routes::post_secret_value),
+        )
+        .layer(Extension(secret_store))
+        .layer(Extension(BaseUrl(base_url.clone())))
         .layer(Extension(auth_state))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());

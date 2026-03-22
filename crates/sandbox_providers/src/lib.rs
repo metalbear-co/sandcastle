@@ -3,7 +3,7 @@ pub mod daytona_auth;
 pub mod docker;
 pub mod local;
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -39,17 +39,7 @@ pub enum SandboxMessage {
     RunCommand {
         command: String,
         dir: Option<String>,
-        reply: oneshot::Sender<String>,
-    },
-    CloneRepository {
-        repo: String,
-        url: String,
-        reply: oneshot::Sender<String>,
-    },
-    GitCommitAndPush {
-        repo: String,
-        branch: String,
-        commit_message: String,
+        env: HashMap<String, String>,
         reply: oneshot::Sender<String>,
     },
 }
@@ -155,47 +145,19 @@ impl SandboxHandle {
             .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
     }
 
-    pub async fn run_command(&self, command: &str, dir: Option<String>) -> String {
+    pub async fn run_command(
+        &self,
+        command: &str,
+        dir: Option<String>,
+        env: HashMap<String, String>,
+    ) -> String {
         let (reply, rx) = oneshot::channel();
         let _ = self
             .tx
             .send(SandboxMessage::RunCommand {
                 command: command.to_string(),
                 dir,
-                reply,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
-    }
-
-    pub async fn clone_repository(&self, repo: &str, url: &str) -> String {
-        let (reply, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(SandboxMessage::CloneRepository {
-                repo: repo.to_string(),
-                url: url.to_string(),
-                reply,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
-    }
-
-    pub async fn git_commit_and_push(
-        &self,
-        repo: &str,
-        branch: &str,
-        commit_message: &str,
-    ) -> String {
-        let (reply, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(SandboxMessage::GitCommitAndPush {
-                repo: repo.to_string(),
-                branch: branch.to_string(),
-                commit_message: commit_message.to_string(),
+                env,
                 reply,
             })
             .await;

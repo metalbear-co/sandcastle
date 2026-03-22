@@ -263,55 +263,24 @@ impl DockerSandbox {
         }
     }
 
-    async fn run_command(&self, command: &str, dir: Option<String>) -> String {
+    async fn run_command(
+        &self,
+        command: &str,
+        dir: Option<String>,
+        env: std::collections::HashMap<String, String>,
+    ) -> String {
         let work_dir = dir.as_deref().unwrap_or(WORK_DIR);
+        let env_vec: Option<Vec<String>> = if env.is_empty() {
+            None
+        } else {
+            Some(env.iter().map(|(k, v)| format!("{k}={v}")).collect())
+        };
         match self
-            .exec_cmd(&["sh", "-c", command], None, Some(work_dir), None)
+            .exec_cmd(&["sh", "-c", command], env_vec, Some(work_dir), None)
             .await
         {
             Ok(r) => r.to_command_output(),
             Err(e) => format!("Failed to run command: {e}"),
-        }
-    }
-
-    async fn clone_repository(&self, repo: &str, url: &str) -> String {
-        let dest = format!("{WORK_DIR}/{repo}");
-        let script = format!(
-            "[ -d '{dest}' ] && echo 'Already cloned at {dest}' || git clone '{url}' '{dest}'"
-        );
-        match self
-            .exec_cmd(&["sh", "-c", &script], None, Some(WORK_DIR), None)
-            .await
-        {
-            Ok(r) if r.exit_code == 0 => r.stdout,
-            Ok(r) => format!("git clone failed: {}", r.stderr),
-            Err(e) => format!("Failed to run git: {e}"),
-        }
-    }
-
-    async fn git_commit_and_push(&self, repo: &str, branch: &str, commit_message: &str) -> String {
-        let repo_dir = format!("{WORK_DIR}/{repo}");
-        let script = "git config user.email sandcastle@localhost && \
-                       git config user.name sandcastle && \
-                       git checkout -b \"$BRANCH\" && \
-                       git add -A && \
-                       git commit -m \"$COMMIT_MSG\" && \
-                       git push origin \"$BRANCH\"";
-        match self
-            .exec_cmd(
-                &["sh", "-c", script],
-                Some(vec![
-                    format!("BRANCH={branch}"),
-                    format!("COMMIT_MSG={commit_message}"),
-                ]),
-                Some(&repo_dir),
-                None,
-            )
-            .await
-        {
-            Ok(r) if r.exit_code == 0 => "ok".to_string(),
-            Ok(r) => format!("git operation failed: {}", r.stderr),
-            Err(e) => format!("Failed to run git: {e}"),
         }
     }
 
@@ -359,23 +328,10 @@ impl DockerSandbox {
                 SandboxMessage::RunCommand {
                     command,
                     dir,
+                    env,
                     reply,
                 } => {
-                    let _ = reply.send(self.run_command(&command, dir).await);
-                }
-                SandboxMessage::CloneRepository { repo, url, reply } => {
-                    let _ = reply.send(self.clone_repository(&repo, &url).await);
-                }
-                SandboxMessage::GitCommitAndPush {
-                    repo,
-                    branch,
-                    commit_message,
-                    reply,
-                } => {
-                    let _ = reply.send(
-                        self.git_commit_and_push(&repo, &branch, &commit_message)
-                            .await,
-                    );
+                    let _ = reply.send(self.run_command(&command, dir, env).await);
                 }
             }
         }

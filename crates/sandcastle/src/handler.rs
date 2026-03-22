@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::Result;
-use octocrab::{Octocrab, models::InstallationId};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -19,8 +18,9 @@ use rmcp::{
 use serde::Deserialize;
 
 use sandcastle_auth::RequestIdentity;
-use sandcastle_auth::github_auth::GitHubCreds;
 use sandcastle_sandbox_providers::{Provider, SandboxHandle};
+
+use crate::secrets::SecretStore;
 
 // ── Parameter types ───────────────────────────────────────────────────────────
 
@@ -38,24 +38,6 @@ struct CreateSandboxParams {
 struct ResumeSandboxParams {
     #[schemars(description = "Sandbox ID returned by create_sandbox")]
     id: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ListRepositoriesParams {
-    #[schemars(description = "Page number (1-based, default 1)")]
-    page: Option<u32>,
-    #[schemars(description = "Filter repos by name substring (case-insensitive)")]
-    query: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct CloneRepoParams {
-    #[schemars(
-        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
-    )]
-    sandbox_id: Option<String>,
-    #[schemars(description = "Owner/repo, e.g. \"octocat/Hello-World\"")]
-    repo: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -134,24 +116,18 @@ struct RunCommandParams {
     command: String,
     #[schemars(description = "Directory to run the command in (default: sandbox work_dir)")]
     dir: Option<String>,
+    #[schemars(
+        description = "Secrets to expose as environment variables. Key = env var name, value = secret name as registered via store_secret. Example: {\"API_KEY\": \"my-api-key\"}"
+    )]
+    secrets: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct CreatePrParams {
+struct StoreSecretParams {
     #[schemars(
-        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+        description = "Name for this secret, e.g. \"github-token\" or \"openai-key\". Used later in run_command to reference the secret."
     )]
-    sandbox_id: Option<String>,
-    #[schemars(description = "Owner/repo, e.g. \"octocat/Hello-World\"")]
-    repo: String,
-    #[schemars(description = "Name for the new branch")]
-    branch: String,
-    #[schemars(description = "Commit message")]
-    commit_message: String,
-    #[schemars(description = "PR title")]
-    pr_title: String,
-    #[schemars(description = "PR body / description")]
-    pr_body: String,
+    name: String,
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -165,26 +141,26 @@ pub struct SandboxRegistry {
 #[derive(Clone)]
 pub struct SandcastleHandler {
     tool_router: ToolRouter<Self>,
-    octocrab: Option<Arc<Octocrab>>,
-    creds: Option<Arc<GitHubCreds>>,
     sandbox_registry: Arc<SandboxRegistry>,
     providers: Vec<Arc<dyn Provider>>,
+    secret_store: Arc<SecretStore>,
+    base_url: String,
 }
 
 #[tool_router]
 impl SandcastleHandler {
     pub fn new(
-        octocrab: Option<Arc<Octocrab>>,
-        creds: Option<Arc<GitHubCreds>>,
         sandbox_registry: Arc<SandboxRegistry>,
         providers: Vec<Arc<dyn Provider>>,
+        secret_store: Arc<SecretStore>,
+        base_url: String,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            octocrab,
-            creds,
             sandbox_registry,
             providers,
+            secret_store,
+            base_url,
         }
     }
 
@@ -296,16 +272,6 @@ impl SandcastleHandler {
         self.resume_known_sandbox(&sandbox_id).await
     }
 
-    fn github_enabled(&self) -> bool {
-        self.octocrab.is_some() && self.creds.is_some()
-    }
-
-    fn github_disabled_message(tool: &str) -> String {
-        format!(
-            "Error: {tool} requires GitHub integration. Restart Sandcastle without SANDCASTLE_NO_GITHUB, or provide GitHub credentials."
-        )
-    }
-
     #[tool(description = "List available sandbox providers")]
     async fn list_providers(&self) -> String {
         let list: Vec<serde_json::Value> = self
@@ -370,93 +336,6 @@ impl SandcastleHandler {
             }
             Err(e) => Self::error_json(&e),
         }
-    }
-
-    #[tool(
-        description = "List GitHub repositories accessible with the configured token, sorted by most recently pushed. Returns up to 100 per page. If has_more is true, call again with page+1."
-    )]
-    async fn list_repositories(
-        &self,
-        Parameters(ListRepositoriesParams { page, query }): Parameters<ListRepositoriesParams>,
-    ) -> String {
-        let Some(octocrab) = &self.octocrab else {
-            return Self::github_disabled_message("list_repositories");
-        };
-        let page_num = page.unwrap_or(1);
-        match octocrab
-            .current()
-            .list_repos_for_authenticated_user()
-            .sort("pushed")
-            .direction("desc")
-            .per_page(100)
-            .page(page_num as u8)
-            .send()
-            .await
-        {
-            Ok(result) => {
-                let has_more = result.next.is_some();
-                let mut repos: Vec<String> = result
-                    .items
-                    .iter()
-                    .map(|r| r.full_name.clone().unwrap_or_default())
-                    .collect();
-                if let Some(q) = &query {
-                    let q = q.to_lowercase();
-                    repos.retain(|name| name.to_lowercase().contains(&q));
-                }
-                serde_json::to_string(&serde_json::json!({
-                    "repos": repos,
-                    "page": page_num,
-                    "has_more": has_more,
-                }))
-                .unwrap_or_else(|e| e.to_string())
-            }
-            Err(e) => format!("Error listing repositories: {e}"),
-        }
-    }
-
-    #[tool(
-        description = "Clone a GitHub repository into a sandbox. Pass sandbox_id when working with multiple sandboxes or clients. Returns the local path."
-    )]
-    async fn clone_repository(
-        &self,
-        ctx: RequestContext<RoleServer>,
-        Parameters(CloneRepoParams { sandbox_id, repo }): Parameters<CloneRepoParams>,
-    ) -> String {
-        let identity = Self::request_identity(&ctx);
-        let Some(creds) = &self.creds else {
-            return Self::github_disabled_message("clone_repository");
-        };
-        let sandbox = match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-
-        let auth_url = match creds.as_ref() {
-            GitHubCreds::PersonalToken { token, user } => {
-                format!("https://{user}:{token}@github.com/{repo}.git")
-            }
-            GitHubCreds::App {
-                app_octocrab,
-                installation_id,
-            } => {
-                match app_octocrab
-                    .installation_and_token(InstallationId(*installation_id))
-                    .await
-                {
-                    Ok((_, token)) => {
-                        use secrecy::ExposeSecret;
-                        format!(
-                            "https://x-access-token:{}@github.com/{repo}.git",
-                            token.expose_secret()
-                        )
-                    }
-                    Err(e) => return format!("Error getting installation token: {e}"),
-                }
-            }
-        };
-
-        sandbox.clone_repository(&repo, &auth_url).await
     }
 
     #[tool(
@@ -558,7 +437,7 @@ impl SandcastleHandler {
     }
 
     #[tool(
-        description = "Run a shell command in the sandbox. dir defaults to the sandbox work directory if not specified."
+        description = "Run a shell command in the sandbox. dir defaults to the sandbox work directory if not specified. Use secrets to inject stored secrets as environment variables."
     )]
     async fn run_command(
         &self,
@@ -567,83 +446,68 @@ impl SandcastleHandler {
             sandbox_id,
             command,
             dir,
+            secrets,
         }): Parameters<RunCommandParams>,
     ) -> String {
         let identity = Self::request_identity(&ctx);
+
+        // Resolve secrets -> env vars
+        let mut env = HashMap::new();
+        if let Some(secret_map) = secrets {
+            for (env_key, secret_name) in secret_map {
+                match self
+                    .secret_store
+                    .get_secret(&identity.owner_key, &secret_name)
+                {
+                    Some(val) => {
+                        env.insert(env_key, val);
+                    }
+                    None => {
+                        return format!(
+                            "Error: secret '{secret_name}' not found. Call store_secret first and set the value via the returned URL."
+                        );
+                    }
+                }
+            }
+        }
+
         match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
             Err(e) => e,
-            Ok(s) => s.run_command(&command, dir).await,
+            Ok(s) => s.run_command(&command, dir, env).await,
         }
     }
 
     #[tool(
-        description = "Commit all changes in a cloned repo, push to a new branch, and open a GitHub PR"
+        description = "Register a new secret slot using the generic provider. Returns a one-time URL the user can visit in their browser or call with curl to set the secret value. The secret can then be injected into run_command via the secrets parameter."
     )]
-    async fn create_pr(
+    async fn store_secret(
         &self,
         ctx: RequestContext<RoleServer>,
-        Parameters(CreatePrParams {
-            sandbox_id,
-            repo,
-            branch,
-            commit_message,
-            pr_title,
-            pr_body,
-        }): Parameters<CreatePrParams>,
+        Parameters(StoreSecretParams { name }): Parameters<StoreSecretParams>,
     ) -> String {
         let identity = Self::request_identity(&ctx);
-        let Some(octocrab) = &self.octocrab else {
-            return Self::github_disabled_message("create_pr");
-        };
-        let sandbox = match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-
-        // Git work → sandbox
-        let result = sandbox
-            .git_commit_and_push(&repo, &branch, &commit_message)
-            .await;
-        if result != "ok" {
-            return result;
-        }
-
-        // GitHub API → handler (needs octocrab)
-        let parts: Vec<&str> = repo.splitn(2, '/').collect();
-        if parts.len() != 2 {
-            return format!("Invalid repo format (expected owner/repo): {repo}");
-        }
-        let (owner, repo_name) = (parts[0], parts[1]);
-
-        match octocrab
-            .pulls(owner, repo_name)
-            .create(&pr_title, &branch, "main")
-            .body(&pr_body)
-            .send()
-            .await
-        {
-            Ok(pr) => format!(
-                "PR created: {}",
-                pr.html_url
-                    .map(|u| u.to_string())
-                    .unwrap_or_else(|| "unknown URL".into())
+        let token = self
+            .secret_store
+            .create_upload_token(&identity.owner_key, &name);
+        let url = format!("{}/secrets/{}", self.base_url, token);
+        serde_json::json!({
+            "url": url,
+            "name": name,
+            "provider": "generic",
+            "instructions": format!(
+                "Visit {} in your browser to set the secret value, or use curl:\ncurl -X POST '{}' -d 'value=YOUR_SECRET'",
+                url, url
             ),
-            Err(e) => format!("Failed to create PR: {e}"),
-        }
+        })
+        .to_string()
     }
 }
 
 impl ServerHandler for SandcastleHandler {
     fn get_info(&self) -> ServerInfo {
-        let github_note = if self.github_enabled() {
-            "GitHub integration is enabled, so list_repositories, clone_repository, and create_pr are available for repository workflows. "
-        } else {
-            "GitHub integration is disabled, so list_repositories, clone_repository, and create_pr are unavailable in this session. "
-        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                format!(
-                    "Sandcastle MCP server. \
+                "Sandcastle MCP server. \
                 IMPORTANT: All file operations and shell commands MUST be performed \
                 using the tools provided by this server (read_file, write_file, \
                 edit_file, glob, grep, run_command). Do NOT use your own built-in tools \
@@ -651,7 +515,6 @@ impl ServerHandler for SandcastleHandler {
                 Workflow: call create_sandbox first, then use the sandbox tools for everything else. \
                 When a client manages multiple sandboxes or loses session continuity, pass sandbox_id explicitly to sandbox tools. \
                 list_providers is available before creating a sandbox. \
-                {github_note}\
                 \n\nSandbox isolation: read_file, write_file, and edit_file are restricted to paths \
                 within the selected sandbox directory. Always use paths under the sandbox work_dir \
                 (returned by create_sandbox). This applies to ALL file operations including plan \
@@ -666,8 +529,8 @@ impl ServerHandler for SandcastleHandler {
                 \n- edit_file(path, old_string, new_string): targeted search-replace within a sandbox file\
                 \n- glob(pattern, path?): find files matching a glob pattern (e.g. **/*.rs)\
                 \n- grep(pattern, path?, include?): search file contents with regex\
-                \n- run_command(command, dir?): run a shell command (dir defaults to sandbox root)",
-                )
+                \n- run_command(command, dir?, secrets?): run a shell command; secrets maps env var names to secret names set via store_secret\
+                \n- store_secret(name): register a secret slot and get a URL to set its value; returns provider=generic URL"
             )
     }
 
@@ -676,18 +539,7 @@ impl ServerHandler for SandcastleHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let tools = self
-            .tool_router
-            .list_all()
-            .into_iter()
-            .filter(|tool| {
-                self.github_enabled()
-                    || !matches!(
-                        tool.name.as_ref(),
-                        "list_repositories" | "clone_repository" | "create_pr"
-                    )
-            })
-            .collect::<Vec<_>>();
+        let tools = self.tool_router.list_all();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         tracing::info!(tools = ?names, "list_tools");
         Ok(ListToolsResult {
