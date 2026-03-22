@@ -13,8 +13,10 @@ pub struct DaytonaCreds {
 pub fn load_daytona_creds(config: &StoredConfig) -> Result<DaytonaCreds> {
     // Env var override
     if let Ok(api_key) = std::env::var("DAYTONA_API_KEY") {
-        let base_url =
-            std::env::var("DAYTONA_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base_url = std::env::var("DAYTONA_BASE_URL")
+            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+            .trim_end_matches('/')
+            .to_string();
         return Ok(DaytonaCreds { api_key, base_url });
     }
 
@@ -23,7 +25,9 @@ pub fn load_daytona_creds(config: &StoredConfig) -> Result<DaytonaCreds> {
         let base_url = config
             .daytona_base_url
             .clone()
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+            .trim_end_matches('/')
+            .to_string();
         return Ok(DaytonaCreds { api_key, base_url });
     }
 
