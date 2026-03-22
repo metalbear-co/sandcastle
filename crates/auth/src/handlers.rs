@@ -11,8 +11,6 @@ use sandcastle_util::generate_token;
 
 use super::{PendingCode, SharedAuthState, persist_tokens};
 
-// ── Parameter types ───────────────────────────────────────────────────────────
-
 #[derive(Deserialize)]
 pub struct AuthorizeParams {
     pub client_id: Option<String>,
@@ -34,12 +32,10 @@ pub struct ApproveForm {
     pub password: Option<String>,
 }
 
-// Dynamic Client Registration request (RFC 7591) — we accept anything, assign a client_id
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     pub client_name: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
-    // All other fields are accepted and silently ignored
 }
 
 #[derive(Deserialize)]
@@ -54,8 +50,6 @@ pub struct TokenRequest {
     #[allow(dead_code)]
     pub code_verifier: Option<String>,
 }
-
-// ── HTML ──────────────────────────────────────────────────────────────────────
 
 pub fn approval_html(
     client_id: &str,
@@ -106,8 +100,6 @@ pub fn approval_html(
 </html>"#
     )
 }
-
-// ── Route handlers ────────────────────────────────────────────────────────────
 
 pub async fn oauth_protected_resource(
     Extension(auth): Extension<SharedAuthState>,
@@ -219,26 +211,20 @@ pub async fn token_endpoint(
     };
 
     match code_data {
-        None => {
-            debug!("token: code not found: {:.8}...", req.code);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "invalid_grant",
-                    "error_description": "Code not found or already used"
-                })),
-            )
-        }
-        Some(c) if c.created_at.elapsed() > std::time::Duration::from_secs(300) => {
-            debug!("token: code expired");
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "invalid_grant",
-                    "error_description": "Code expired"
-                })),
-            )
-        }
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "Code not found or already used"
+            })),
+        ),
+        Some(c) if c.created_at.elapsed() > std::time::Duration::from_secs(300) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "Code expired"
+            })),
+        ),
         Some(c) => {
             let token = generate_token();
             {
@@ -259,6 +245,26 @@ pub async fn token_endpoint(
             )
         }
     }
+}
+
+pub async fn register_client(
+    axum::extract::Json(req): axum::extract::Json<RegisterRequest>,
+) -> impl IntoResponse {
+    let client_id = generate_token();
+    let name = req.client_name.unwrap_or_else(|| "MCP Client".to_string());
+    let uris = req.redirect_uris.unwrap_or_default();
+    debug!("register: client_name={name:?} redirect_uris={uris:?} -> client_id={client_id:.8}...");
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "client_id": client_id,
+            "client_name": name,
+            "redirect_uris": uris,
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none"
+        })),
+    )
 }
 
 #[cfg(test)]
@@ -386,7 +392,6 @@ mod tests {
         let auth = make_auth(None);
         let router = app(auth.clone());
 
-        // Approve — should redirect with ?code=
         let resp = router
             .oneshot(
                 Request::post("/authorize/approve")
@@ -402,7 +407,6 @@ mod tests {
         let location = resp.headers()["location"].to_str().unwrap().to_string();
         assert!(location.contains("code="));
 
-        // Extract code
         let code = location
             .split("code=")
             .nth(1)
@@ -411,7 +415,6 @@ mod tests {
             .next()
             .unwrap();
 
-        // Exchange code for token
         let resp2 = app(auth)
             .oneshot(
                 Request::post("/token")
@@ -475,25 +478,4 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FOUND);
     }
-}
-
-// Dynamic Client Registration (RFC 7591) — accept any client, assign a client_id
-pub async fn register_client(
-    axum::extract::Json(req): axum::extract::Json<RegisterRequest>,
-) -> impl IntoResponse {
-    let client_id = generate_token();
-    let name = req.client_name.unwrap_or_else(|| "MCP Client".to_string());
-    let uris = req.redirect_uris.unwrap_or_default();
-    debug!("register: client_name={name:?} redirect_uris={uris:?} -> client_id={client_id:.8}...");
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "client_id": client_id,
-            "client_name": name,
-            "redirect_uris": uris,
-            "grant_types": ["authorization_code"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none"
-        })),
-    )
 }
