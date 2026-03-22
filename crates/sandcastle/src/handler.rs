@@ -492,7 +492,7 @@ impl SandcastleHandler {
     }
 
     #[tool(
-        description = "Run a shell command in the sandbox. dir defaults to the sandbox work directory if not specified. Use secrets to inject stored secrets as environment variables."
+        description = "Run a shell command in the sandbox. dir defaults to the sandbox work directory if not specified. Use secrets to inject stored secrets as environment variables. Before using secrets, call list_secrets to see which secret names are already available."
     )]
     async fn run_command(
         &self,
@@ -529,6 +529,15 @@ impl SandcastleHandler {
             Err(e) => e,
             Ok(s) => s.run_command(&command, dir, env).await,
         }
+    }
+
+    #[tool(
+        description = "List the names of all secrets stored for this client. Call this before run_command, push_to_branch, or create_pr to discover which secrets are already available."
+    )]
+    async fn list_secrets(&self, ctx: RequestContext<RoleServer>) -> String {
+        let identity = Self::request_identity(&ctx);
+        let names = self.secret_store.list_secrets(&identity.owner_key);
+        serde_json::to_string(&names).unwrap_or_default()
     }
 
     #[tool(
@@ -584,7 +593,8 @@ impl ServerHandler for SandcastleHandler {
                 \n- edit_file(path, old_string, new_string): targeted search-replace within a sandbox file\
                 \n- glob(pattern, path?): find files matching a glob pattern (e.g. **/*.rs)\
                 \n- grep(pattern, path?, include?): search file contents with regex\
-                \n- run_command(command, dir?, secrets?): run a shell command; secrets maps env var names to secret names set via store_secret\
+                \n- list_secrets(): list names of stored secrets for this client — call this before run_command/push_to_branch/create_pr to discover available secrets\
+                \n- run_command(command, dir?, secrets?): run a shell command; secrets maps env var names to secret names set via store_secret; call list_secrets first to discover available secrets\
                 \n- store_secret(name): register a secret slot and get a URL to set its value; returns provider=generic URL"
             )
     }
