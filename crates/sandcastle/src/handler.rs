@@ -22,8 +22,6 @@ use sandcastle_sandbox_providers::{Provider, SandboxHandle};
 
 use crate::secrets::SecretStore;
 
-// ── Parameter types ───────────────────────────────────────────────────────────
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CreateSandboxParams {
     #[schemars(description = "Provider name, e.g. \"local\"")]
@@ -130,12 +128,26 @@ struct StoreSecretParams {
     name: String,
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListSandboxesParams {
+    #[schemars(description = "Optional provider filter, e.g. \"docker\"")]
+    provider: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct SandboxMeta {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub work_dir: String,
+    pub owner: String,
+}
 
 #[derive(Default)]
 pub struct SandboxRegistry {
     owners: RwLock<HashMap<String, String>>,
     active_by_owner: RwLock<HashMap<String, String>>,
+    sandboxes: RwLock<HashMap<String, SandboxMeta>>,
 }
 
 #[derive(Clone)]
@@ -191,8 +203,6 @@ impl SandcastleHandler {
 
     fn is_owned_by(&self, identity: &RequestIdentity, sandbox_id: &str) -> bool {
         if identity.no_auth {
-            // No-auth mode is only intended for local testing, so allow explicit sandbox IDs
-            // to survive session churn without enforcing ownership.
             return true;
         }
         self.sandbox_registry
@@ -230,6 +240,11 @@ impl SandcastleHandler {
             .write()
             .unwrap()
             .retain(|_, active_id| active_id != sandbox_id);
+        self.sandbox_registry
+            .sandboxes
+            .write()
+            .unwrap()
+            .remove(sandbox_id);
     }
 
     async fn resume_known_sandbox(&self, sandbox_id: &str) -> Result<SandboxHandle, String> {
@@ -307,10 +322,50 @@ impl SandcastleHandler {
                     let name = handle.name.clone();
                     let path = handle.work_dir.display().to_string();
                     self.set_active_sandbox(&identity, &id);
+                    self.sandbox_registry.sandboxes.write().unwrap().insert(
+                        id.clone(),
+                        SandboxMeta {
+                            id: id.clone(),
+                            name: name.clone(),
+                            provider: provider.clone(),
+                            work_dir: path.clone(),
+                            owner: identity.owner_key.clone(),
+                        },
+                    );
                     Self::sandbox_summary_json(&id, &name, &path)
                 }
             },
         }
+    }
+
+    #[tool(
+        description = "List available sandboxes for the current user. Returns a JSON array with sandbox_id, name, provider, work_dir, and status. Supports optional provider filtering."
+    )]
+    async fn list_sandboxes(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(ListSandboxesParams { provider }): Parameters<ListSandboxesParams>,
+    ) -> String {
+        let identity = Self::request_identity(&ctx);
+        let sandboxes = self.sandbox_registry.sandboxes.read().unwrap();
+        let list: Vec<serde_json::Value> = sandboxes
+            .values()
+            .filter(|s| s.owner == identity.owner_key)
+            .filter(|s| match &provider {
+                Some(p) => &s.provider == p,
+                None => true,
+            })
+            .map(|s| {
+                serde_json::json!({
+                    "sandbox_id": s.id,
+                    "name": s.name,
+                    "provider": s.provider,
+                    "work_dir": s.work_dir,
+                    "status": "running"
+                })
+            })
+            .collect();
+        serde_json::to_string(&list).unwrap_or_default()
     }
 
     #[tool(
@@ -451,7 +506,6 @@ impl SandcastleHandler {
     ) -> String {
         let identity = Self::request_identity(&ctx);
 
-        // Resolve secrets -> env vars
         let mut env = HashMap::new();
         if let Some(secret_map) = secrets {
             for (env_key, secret_name) in secret_map {
@@ -523,6 +577,7 @@ impl ServerHandler for SandcastleHandler {
                 \n\nTool reference:\
                 \n- create_sandbox(provider, name): create a sandbox and return JSON with sandbox_id, name, and work_dir; when calling, choose a short descriptive name that reflects the current task (e.g. \"fix-login-bug\", \"add-export-feature\"). If no obvious name exists, ask the user before proceeding.\
                 \n- resume_sandbox(id): resume a sandbox by ID and return JSON with sandbox_id, name, and work_dir\
+                \n- list_sandboxes(provider?): list the current user's tracked sandboxes; optional provider filter\
                 \n- sandbox tools accept an optional sandbox_id; provide it explicitly for multi-sandbox workflows\
                 \n- read_file(path, offset?, limit?): read a file within the sandbox; offset/limit for line ranges with line numbers\
                 \n- write_file(path, content): create or overwrite a file within the sandbox\
