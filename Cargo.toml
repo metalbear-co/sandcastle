@@ -14,6 +14,5 @@ members = [
     "crates/secrets",
     "crates/secrets_memory",
     "crates/secrets_gcp",
-    "tooling/xtask",
 ]
 resolver = "3"
