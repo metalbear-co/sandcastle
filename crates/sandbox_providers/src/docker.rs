@@ -8,7 +8,8 @@ use std::{
 use bollard::{
     Docker,
     container::{
-        Config, CreateContainerOptions, LogOutput, RemoveContainerOptions, StartContainerOptions,
+        Config, CreateContainerOptions, ListContainersOptions, LogOutput, RemoveContainerOptions,
+        StartContainerOptions,
     },
     exec::{CreateExecOptions, StartExecResults},
     image::CreateImageOptions,
@@ -445,6 +446,41 @@ impl DockerProvider {
             .map_err(|e| format!("Failed to start container: {e}"))?;
 
         Ok(container.id)
+    }
+
+    pub async fn cleanup_stale_containers(&self) {
+        let mut filters = HashMap::new();
+        filters.insert("name", vec!["sandcastle-"]);
+        let containers = match self
+            .docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters,
+                ..Default::default()
+            }))
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("failed to list stale docker containers: {e}");
+                return;
+            }
+        };
+        for container in containers {
+            let Some(id) = container.id else { continue };
+            let _ = self.docker.stop_container(&id, None).await;
+            let _ = self
+                .docker
+                .remove_container(
+                    &id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+            tracing::info!("removed stale container {id}");
+        }
     }
 
     pub fn start_cleanup_task(self: &Arc<Self>) {

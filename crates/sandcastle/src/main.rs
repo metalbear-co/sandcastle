@@ -105,6 +105,7 @@ async fn main() -> Result<()> {
     if enabled.contains(&"docker".to_string()) {
         match DockerProvider::new(Duration::from_secs(120 * 60)) {
             Ok(docker) => {
+                docker.cleanup_stale_containers().await;
                 docker.start_cleanup_task();
                 providers.push(docker);
                 info!("docker sandbox provider registered");
