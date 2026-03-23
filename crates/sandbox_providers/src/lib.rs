@@ -40,7 +40,8 @@ pub enum SandboxMessage {
         command: String,
         dir: Option<String>,
         env: HashMap<String, String>,
-        reply: oneshot::Sender<String>,
+        output_tx: mpsc::Sender<String>,
+        reply: oneshot::Sender<i32>,
     },
 }
 
@@ -150,19 +151,20 @@ impl SandboxHandle {
         command: &str,
         dir: Option<String>,
         env: HashMap<String, String>,
-    ) -> String {
-        let (reply, rx) = oneshot::channel();
+    ) -> (mpsc::Receiver<String>, oneshot::Receiver<i32>) {
+        let (output_tx, output_rx) = mpsc::channel(64);
+        let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self
             .tx
             .send(SandboxMessage::RunCommand {
                 command: command.to_string(),
                 dir,
                 env,
-                reply,
+                output_tx,
+                reply: reply_tx,
             })
             .await;
-        rx.await
-            .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
+        (output_rx, reply_rx)
     }
 }
 

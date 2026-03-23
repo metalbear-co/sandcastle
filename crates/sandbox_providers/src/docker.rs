@@ -18,7 +18,7 @@ use bollard::{
 use futures_util::StreamExt;
 use tokio::{
     io::AsyncWriteExt,
-    sync::{RwLock, mpsc},
+    sync::{RwLock, mpsc, oneshot},
 };
 
 use crate::{Provider, SandboxHandle, SandboxMessage};
@@ -32,15 +32,6 @@ struct ExecResult {
     exit_code: i64,
     stdout: String,
     stderr: String,
-}
-
-impl ExecResult {
-    fn to_command_output(&self) -> String {
-        format!(
-            "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
-            self.exit_code, self.stdout, self.stderr
-        )
-    }
 }
 
 struct DockerSandbox {
@@ -269,20 +260,84 @@ impl DockerSandbox {
         command: &str,
         dir: Option<String>,
         env: std::collections::HashMap<String, String>,
-    ) -> String {
+        output_tx: mpsc::Sender<String>,
+        reply: oneshot::Sender<i32>,
+    ) {
         let work_dir = dir.as_deref().unwrap_or(WORK_DIR);
         let env_vec: Option<Vec<String>> = if env.is_empty() {
             None
         } else {
             Some(env.iter().map(|(k, v)| format!("{k}={v}")).collect())
         };
-        match self
-            .exec_cmd(&["sh", "-c", command], env_vec, Some(work_dir), None)
+        let env_refs: Option<Vec<&str>> = env_vec
+            .as_deref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+        let exec_id = match self
+            .docker
+            .create_exec(
+                &self.container_id,
+                CreateExecOptions {
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    attach_stdin: Some(false),
+                    cmd: Some(vec!["sh", "-c", command]),
+                    env: env_refs,
+                    working_dir: Some(work_dir),
+                    ..Default::default()
+                },
+            )
             .await
         {
-            Ok(r) => r.to_command_output(),
-            Err(e) => format!("Failed to run command: {e}"),
+            Ok(r) => r.id,
+            Err(e) => {
+                let _ = output_tx.send(format!("Failed to create exec: {e}")).await;
+                let _ = reply.send(-1);
+                return;
+            }
+        };
+
+        let start_result = match self.docker.start_exec(&exec_id, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = output_tx.send(format!("Failed to start exec: {e}")).await;
+                let _ = reply.send(-1);
+                return;
+            }
+        };
+
+        if let StartExecResults::Attached { mut output, .. } = start_result {
+            while let Some(chunk) = output.next().await {
+                match chunk {
+                    Ok(LogOutput::StdOut { message }) => {
+                        for line in String::from_utf8_lossy(&message).lines() {
+                            if output_tx.send(line.to_string()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(LogOutput::StdErr { message }) => {
+                        for line in String::from_utf8_lossy(&message).lines() {
+                            if output_tx.send(line.to_string()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
+        drop(output_tx);
+
+        let exit_code = self
+            .docker
+            .inspect_exec(&exec_id)
+            .await
+            .ok()
+            .and_then(|i| i.exit_code)
+            .unwrap_or(-1) as i32;
+
+        let _ = reply.send(exit_code);
     }
 
     pub async fn run(self, mut rx: mpsc::Receiver<SandboxMessage>) {
@@ -330,9 +385,10 @@ impl DockerSandbox {
                     command,
                     dir,
                     env,
+                    output_tx,
                     reply,
                 } => {
-                    let _ = reply.send(self.run_command(&command, dir, env).await);
+                    self.run_command(&command, dir, env, output_tx, reply).await;
                 }
             }
         }

@@ -6,8 +6,10 @@ use std::{
 };
 
 use regex::Regex;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use walkdir::WalkDir;
 
 use sandcastle_util::generate_token;
@@ -193,35 +195,61 @@ impl LocalSandbox {
         results.join("\n")
     }
 
-    #[tracing::instrument(skip(self, env), fields(sandbox = %self.id))]
+    #[tracing::instrument(skip(self, env, output_tx, reply), fields(sandbox = %self.id))]
     async fn run_command(
         &self,
         command: &str,
         dir: Option<String>,
-        env: std::collections::HashMap<String, String>,
-    ) -> String {
+        env: HashMap<String, String>,
+        output_tx: mpsc::Sender<String>,
+        reply: oneshot::Sender<i32>,
+    ) {
         let work_dir = dir.unwrap_or_else(|| self.work_dir.display().to_string());
         if let Err(e) = self.ensure_in_sandbox(&work_dir) {
-            return e;
+            let _ = output_tx.send(e).await;
+            let _ = reply.send(-1);
+            return;
         }
-        match Command::new("sh")
+        let mut child = match Command::new("sh")
             .arg("-c")
             .arg(command)
             .current_dir(&work_dir)
             .envs(&env)
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
         {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                format!(
-                    "exit_code: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                    o.status.code().unwrap_or(-1)
-                )
+            Ok(c) => c,
+            Err(e) => {
+                let _ = output_tx.send(format!("Failed to run command: {e}")).await;
+                let _ = reply.send(-1);
+                return;
             }
-            Err(e) => format!("Failed to run command: {e}"),
-        }
+        };
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+
+        let tx1 = output_tx.clone();
+        let stdout_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if tx1.send(line).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if output_tx.send(line).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let (status, _, _) = tokio::join!(child.wait(), stdout_task, stderr_task);
+        let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
+        let _ = reply.send(exit_code);
     }
 
     pub async fn run(self, mut rx: mpsc::Receiver<SandboxMessage>) {
@@ -269,9 +297,10 @@ impl LocalSandbox {
                     command,
                     dir,
                     env,
+                    output_tx,
                     reply,
                 } => {
-                    let _ = reply.send(self.run_command(&command, dir, env).await);
+                    self.run_command(&command, dir, env, output_tx, reply).await;
                 }
             }
         }

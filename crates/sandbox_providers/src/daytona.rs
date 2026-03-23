@@ -9,7 +9,7 @@ use daytona_client::{
     DaytonaClient, DaytonaConfig,
     models::{CreateSandboxParams, ExecuteRequest, SandboxState},
 };
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::{Provider, SandboxHandle, SandboxMessage};
@@ -22,12 +22,6 @@ const WORK_DIR: &str = "/home/user";
 struct ExecResult {
     exit_code: i32,
     result: String,
-}
-
-impl ExecResult {
-    fn to_command_output(&self) -> String {
-        format!("exit_code: {}\n{}", self.exit_code, self.result)
-    }
 }
 
 struct DaytonaSandbox {
@@ -181,7 +175,9 @@ impl DaytonaSandbox {
         command: &str,
         dir: Option<String>,
         env: std::collections::HashMap<String, String>,
-    ) -> String {
+        output_tx: mpsc::Sender<String>,
+        reply: oneshot::Sender<i32>,
+    ) {
         let full_command = if env.is_empty() {
             command.to_string()
         } else {
@@ -191,10 +187,15 @@ impl DaytonaSandbox {
                 .collect();
             format!("{prefix}{command}")
         };
-        match self.exec(&full_command, dir.as_deref()).await {
-            Ok(r) => r.to_command_output(),
-            Err(e) => format!("Failed to run command: {e}"),
+        let (exit_code, output) = match self.exec(&full_command, dir.as_deref()).await {
+            Ok(r) => (r.exit_code, r.result),
+            Err(e) => (-1, format!("Failed to run command: {e}")),
+        };
+        if !output.is_empty() {
+            let _ = output_tx.send(output).await;
         }
+        drop(output_tx);
+        let _ = reply.send(exit_code);
     }
 
     pub async fn run(self, mut rx: mpsc::Receiver<SandboxMessage>) {
@@ -242,9 +243,10 @@ impl DaytonaSandbox {
                     command,
                     dir,
                     env,
+                    output_tx,
                     reply,
                 } => {
-                    let _ = reply.send(self.run_command(&command, dir, env).await);
+                    self.run_command(&command, dir, env, output_tx, reply).await;
                 }
             }
         }

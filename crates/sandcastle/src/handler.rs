@@ -9,7 +9,8 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
         CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams,
-        ServerCapabilities, ServerInfo,
+        ProgressNotification, ProgressNotificationParam, ServerCapabilities, ServerInfo,
+        ServerNotification,
     },
     schemars,
     service::RequestContext,
@@ -525,9 +526,38 @@ impl SandcastleHandler {
             }
         }
 
+        let progress_token = ctx.meta.get_progress_token();
+
         match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
             Err(e) => e,
-            Ok(s) => s.run_command(&command, dir, env).await,
+            Ok(s) => {
+                let (mut output_rx, done_rx) = s.run_command(&command, dir, env).await;
+
+                let mut accumulated = String::new();
+                let mut progress: u64 = 0;
+
+                while let Some(line) = output_rx.recv().await {
+                    accumulated.push_str(&line);
+                    accumulated.push('\n');
+                    if let Some(ref token) = progress_token {
+                        let _ = ctx
+                            .peer
+                            .send_notification(ServerNotification::ProgressNotification(
+                                ProgressNotification::new(
+                                    ProgressNotificationParam::new(token.clone(), progress as f64)
+                                        .with_message(line),
+                                ),
+                            ))
+                            .await;
+                        progress += 1;
+                    }
+                }
+
+                match done_rx.await {
+                    Ok(exit_code) => format!("exit_code: {exit_code}\n{accumulated}"),
+                    Err(_) => format!("exit_code: -1\n{accumulated}"),
+                }
+            }
         }
     }
 
