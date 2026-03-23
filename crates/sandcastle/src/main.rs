@@ -21,10 +21,14 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
 use sandcastle_auth::handlers::{
-    authorize_approve, authorize_page, oauth_authorization_server, oauth_protected_resource,
-    register_client, token_endpoint,
+    auth_callback, authorize_approve, authorize_page, oauth_authorization_server,
+    oauth_protected_resource, register_client, token_endpoint,
 };
 use sandcastle_auth::middleware::require_auth;
+use sandcastle_auth::provider::SharedAuthProvider;
+use sandcastle_auth::providers::{
+    github::GitHubAuthProvider, google::GoogleAuthProvider, local::LocalAuthProvider,
+};
 use sandcastle_auth::{AuthState, SharedAuthState, load_persisted_tokens};
 use sandcastle_sandbox_providers::{
     Provider, daytona::DaytonaProvider, docker::DockerProvider, local::LocalProvider,
@@ -55,24 +59,64 @@ async fn main() -> Result<()> {
 
     let stored_config = sandcastle_keychain::load_config();
 
-    let password = if no_auth {
-        None
+    let auth_provider: SharedAuthProvider = if no_auth {
+        Arc::new(LocalAuthProvider { password: None })
     } else {
-        sandcastle_auth::github_auth::load_sandcastle_password(&stored_config)?
+        match std::env::var("AUTH_PROVIDER")
+            .unwrap_or_else(|_| "local".to_string())
+            .as_str()
+        {
+            "github" => {
+                let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID").map_err(|_| {
+                    anyhow::anyhow!("GITHUB_OAUTH_CLIENT_ID is required for AUTH_PROVIDER=github")
+                })?;
+                let client_secret = std::env::var("GITHUB_OAUTH_CLIENT_SECRET").map_err(|_| {
+                    anyhow::anyhow!(
+                        "GITHUB_OAUTH_CLIENT_SECRET is required for AUTH_PROVIDER=github"
+                    )
+                })?;
+                info!("auth: using GitHub OAuth provider");
+                Arc::new(GitHubAuthProvider {
+                    client_id,
+                    client_secret,
+                })
+            }
+            "google" => {
+                let client_id = std::env::var("GOOGLE_CLIENT_ID").map_err(|_| {
+                    anyhow::anyhow!("GOOGLE_CLIENT_ID is required for AUTH_PROVIDER=google")
+                })?;
+                let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| {
+                    anyhow::anyhow!("GOOGLE_CLIENT_SECRET is required for AUTH_PROVIDER=google")
+                })?;
+                info!("auth: using Google OAuth provider");
+                Arc::new(GoogleAuthProvider {
+                    client_id,
+                    client_secret,
+                })
+            }
+            _ => {
+                // "local" or any unrecognised value
+                let password =
+                    sandcastle_auth::github_auth::load_sandcastle_password(&stored_config)?;
+                if password.is_some() {
+                    info!("auth: password required to approve OAuth flow");
+                }
+                Arc::new(LocalAuthProvider { password })
+            }
+        }
     };
 
     let auth_state: SharedAuthState = Arc::new(AuthState {
         pending_codes: RwLock::new(HashMap::new()),
         valid_tokens: RwLock::new(load_persisted_tokens(&stored_config)),
+        pending_auth_requests: RwLock::new(HashMap::new()),
         base_url: base_url.clone(),
         no_auth,
-        password,
+        provider: auth_provider,
     });
 
     if no_auth {
         info!("auth: disabled (SANDCASTLE_NO_AUTH is set)");
-    } else if auth_state.password.is_some() {
-        info!("auth: password required to approve OAuth flow");
     }
 
     if !no_auth {
@@ -81,7 +125,7 @@ async fn main() -> Result<()> {
                 .valid_tokens
                 .write()
                 .unwrap()
-                .insert(token, "env".to_string());
+                .insert(token, "client:mcp_token_user".to_string());
             info!("auth: using pre-shared token from MCP_TOKEN");
         } else {
             info!("auth: open {base_url}/authorize to approve MCP access");
@@ -169,6 +213,7 @@ async fn main() -> Result<()> {
         )
         .route("/authorize", get(authorize_page))
         .route("/authorize/approve", post(authorize_approve))
+        .route("/auth/callback", get(auth_callback))
         .route("/token", post(token_endpoint))
         .route("/register", post(register_client))
         .route(

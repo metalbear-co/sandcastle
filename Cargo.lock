@@ -1653,17 +1653,18 @@ name = "sandcastle-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
- "http-body-util",
+ "base64",
  "jsonwebtoken",
  "octocrab",
+ "reqwest",
  "sandcastle-keychain",
  "sandcastle-util",
  "secrecy",
  "serde",
  "serde_json",
  "tokio",
- "tower",
  "tracing",
 ]
 

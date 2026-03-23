@@ -1,6 +1,8 @@
 pub mod github_auth;
 pub mod handlers;
 pub mod middleware;
+pub mod provider;
+pub mod providers;
 
 use std::{
     collections::HashMap,
@@ -10,19 +12,31 @@ use std::{
 
 use sandcastle_keychain::{StoredConfig, load_config, save_config};
 
-#[allow(dead_code)]
+use provider::SharedAuthProvider;
+
 pub struct PendingCode {
     pub created_at: Instant,
     pub redirect_uri: Option<String>,
     pub client_id: String,
+    pub owner_key: String,
+}
+
+pub struct PendingAuthRequest {
+    pub client_id: String,
+    pub redirect_uri: Option<String>,
+    pub client_state: Option<String>,
+    pub created_at: Instant,
 }
 
 pub struct AuthState {
     pub pending_codes: RwLock<HashMap<String, PendingCode>>,
-    pub valid_tokens: RwLock<HashMap<String, String>>, // token -> client_id
+    /// token → owner_key (e.g. "client:abc", "github:12345", "google:sub")
+    pub valid_tokens: RwLock<HashMap<String, String>>,
+    /// server-side state → pending IdP auth request
+    pub pending_auth_requests: RwLock<HashMap<String, PendingAuthRequest>>,
     pub base_url: String,
     pub no_auth: bool,
-    pub password: Option<String>,
+    pub provider: SharedAuthProvider,
 }
 
 #[derive(Clone, Debug)]

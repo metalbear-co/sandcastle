@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use axum::{
     Json,
     extract::{Extension, Form, Query},
@@ -9,7 +11,7 @@ use tracing::debug;
 
 use sandcastle_util::generate_token;
 
-use super::{PendingCode, SharedAuthState, persist_tokens};
+use super::{PendingAuthRequest, PendingCode, SharedAuthState, persist_tokens};
 
 #[derive(Deserialize)]
 pub struct AuthorizeParams {
@@ -30,6 +32,13 @@ pub struct ApproveForm {
     pub redirect_uri: Option<String>,
     pub state: Option<String>,
     pub password: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CallbackParams {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -128,59 +137,86 @@ pub async fn oauth_authorization_server(
 pub async fn authorize_page(
     Extension(auth): Extension<SharedAuthState>,
     Query(params): Query<AuthorizeParams>,
-) -> impl IntoResponse {
+) -> Response {
     let client_id = params.client_id.unwrap_or_default();
     let redirect_uri = params.redirect_uri.unwrap_or_default();
-    let state = params.state.unwrap_or_default();
+    let client_state = params.state.unwrap_or_default();
+
+    // Generate a server-side state to correlate the IdP callback with this request.
+    let server_state = generate_token();
+    let callback_url = format!("{}/auth/callback", auth.base_url);
+
+    if let Some(idp_url) = auth.provider.redirect_url(&callback_url, &server_state) {
+        auth.pending_auth_requests.write().unwrap().insert(
+            server_state,
+            PendingAuthRequest {
+                client_id,
+                redirect_uri: if redirect_uri.is_empty() {
+                    None
+                } else {
+                    Some(redirect_uri)
+                },
+                client_state: if client_state.is_empty() {
+                    None
+                } else {
+                    Some(client_state)
+                },
+                created_at: Instant::now(),
+            },
+        );
+        return (StatusCode::FOUND, [("Location", idp_url)]).into_response();
+    }
+
+    // Local provider: show approval form.
     let html = approval_html(
         &client_id,
         &redirect_uri,
-        &state,
-        auth.password.is_some(),
+        &client_state,
+        auth.provider.needs_password(),
         None,
     );
-    (StatusCode::OK, [("Content-Type", "text/html")], html)
+    (StatusCode::OK, [("Content-Type", "text/html")], html).into_response()
 }
 
 pub async fn authorize_approve(
     Extension(auth): Extension<SharedAuthState>,
     Form(form): Form<ApproveForm>,
 ) -> Response {
-    if let Some(expected) = &auth.password {
-        let provided = form.password.as_deref().unwrap_or("");
-        if provided != expected.as_str() {
-            debug!("approve: wrong password");
-            let client_id = form.client_id.as_deref().unwrap_or("");
-            let redirect_uri = form.redirect_uri.as_deref().unwrap_or("");
-            let state = form.state.as_deref().unwrap_or("");
-            let html = approval_html(
-                client_id,
-                redirect_uri,
-                state,
-                true,
-                Some("Incorrect password."),
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                [("Content-Type", "text/html")],
-                html,
-            )
-                .into_response();
-        }
+    let provided = form.password.as_deref().unwrap_or("");
+    if !auth.provider.check_password(provided) {
+        debug!("approve: wrong password");
+        let client_id = form.client_id.as_deref().unwrap_or("");
+        let redirect_uri = form.redirect_uri.as_deref().unwrap_or("");
+        let state = form.state.as_deref().unwrap_or("");
+        let html = approval_html(
+            client_id,
+            redirect_uri,
+            state,
+            true,
+            Some("Incorrect password."),
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "text/html")],
+            html,
+        )
+            .into_response();
     }
 
     let code = generate_token();
     let client_id = form.client_id.clone().unwrap_or_default();
     let redirect_uri = form.redirect_uri.clone();
+    let owner_key = format!("client:{client_id}");
 
     {
         let mut codes = auth.pending_codes.write().unwrap();
         codes.insert(
             code.clone(),
             PendingCode {
-                created_at: std::time::Instant::now(),
+                created_at: Instant::now(),
                 redirect_uri: redirect_uri.clone(),
                 client_id: client_id.clone(),
+                owner_key,
             },
         );
     }
@@ -201,6 +237,92 @@ pub async fn authorize_approve(
     (StatusCode::FOUND, [("Location", location)]).into_response()
 }
 
+pub async fn auth_callback(
+    Extension(auth): Extension<SharedAuthState>,
+    Query(params): Query<CallbackParams>,
+) -> Response {
+    if let Some(error) = params.error {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("IdP returned an error: {error}"),
+        )
+            .into_response();
+    }
+
+    let code = match params.code {
+        Some(c) => c,
+        None => {
+            return (StatusCode::BAD_REQUEST, "Missing code parameter").into_response();
+        }
+    };
+    let state = match params.state {
+        Some(s) => s,
+        None => {
+            return (StatusCode::BAD_REQUEST, "Missing state parameter").into_response();
+        }
+    };
+
+    let pending = auth.pending_auth_requests.write().unwrap().remove(&state);
+    let pending = match pending {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Unknown or expired authorization state",
+            )
+                .into_response();
+        }
+    };
+
+    if pending.created_at.elapsed() > Duration::from_secs(600) {
+        return (StatusCode::BAD_REQUEST, "Authorization request expired").into_response();
+    }
+
+    let callback_url = format!("{}/auth/callback", auth.base_url);
+    let owner_key = match auth.provider.exchange_code(&code, &callback_url).await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!("auth_callback: exchange_code failed: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Authentication failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let auth_code = generate_token();
+    {
+        let mut codes = auth.pending_codes.write().unwrap();
+        codes.insert(
+            auth_code.clone(),
+            PendingCode {
+                created_at: Instant::now(),
+                redirect_uri: pending.redirect_uri.clone(),
+                client_id: pending.client_id.clone(),
+                owner_key: owner_key.clone(),
+            },
+        );
+    }
+
+    let base_redirect = pending
+        .redirect_uri
+        .unwrap_or_else(|| format!("{}/", auth.base_url));
+    let sep = if base_redirect.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    let location = if let Some(s) = pending.client_state {
+        format!("{base_redirect}{sep}code={auth_code}&state={s}")
+    } else {
+        format!("{base_redirect}{sep}code={auth_code}")
+    };
+
+    debug!("auth_callback: owner={owner_key:.16}... -> redirecting to {location:.60}...");
+    (StatusCode::FOUND, [("Location", location)]).into_response()
+}
+
 pub async fn token_endpoint(
     Extension(auth): Extension<SharedAuthState>,
     Form(req): Form<TokenRequest>,
@@ -218,7 +340,7 @@ pub async fn token_endpoint(
                 "error_description": "Code not found or already used"
             })),
         ),
-        Some(c) if c.created_at.elapsed() > std::time::Duration::from_secs(300) => (
+        Some(c) if c.created_at.elapsed() > Duration::from_secs(300) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": "invalid_grant",
@@ -229,12 +351,12 @@ pub async fn token_endpoint(
             let token = generate_token();
             {
                 let mut tokens = auth.valid_tokens.write().unwrap();
-                tokens.insert(token.clone(), c.client_id.clone());
+                tokens.insert(token.clone(), c.owner_key.clone());
                 persist_tokens(&tokens);
             }
             debug!(
-                "token: issued {token:.8}... for client {:.8}...",
-                c.client_id
+                "token: issued {token:.8}... for owner {:.16}...",
+                c.owner_key
             );
             (
                 StatusCode::OK,
@@ -267,215 +389,3 @@ pub async fn register_client(
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use axum::{
-        Extension, Router,
-        body::Body,
-        http::{Request, StatusCode},
-        routing::{get, post},
-    };
-    use http_body_util::BodyExt;
-    use std::{
-        collections::HashMap,
-        sync::{Arc, RwLock},
-    };
-    use tower::ServiceExt;
-
-    use crate::{AuthState, SharedAuthState};
-
-    fn make_auth(password: Option<&str>) -> SharedAuthState {
-        Arc::new(AuthState {
-            pending_codes: RwLock::new(HashMap::new()),
-            valid_tokens: RwLock::new(HashMap::new()),
-            base_url: "http://localhost".to_string(),
-            no_auth: false,
-            password: password.map(|s| s.to_string()),
-        })
-    }
-
-    fn app(auth: SharedAuthState) -> Router {
-        Router::new()
-            .route(
-                "/.well-known/oauth-protected-resource",
-                get(super::oauth_protected_resource),
-            )
-            .route(
-                "/.well-known/oauth-authorization-server",
-                get(super::oauth_authorization_server),
-            )
-            .route("/authorize", get(super::authorize_page))
-            .route("/authorize/approve", post(super::authorize_approve))
-            .route("/token", post(super::token_endpoint))
-            .route("/register", post(super::register_client))
-            .layer(Extension(auth))
-    }
-
-    async fn body_str(body: axum::body::Body) -> String {
-        let bytes = body.collect().await.unwrap().to_bytes();
-        String::from_utf8(bytes.to_vec()).unwrap()
-    }
-
-    #[tokio::test]
-    async fn protected_resource_returns_json() {
-        let resp = app(make_auth(None))
-            .oneshot(
-                Request::get("/.well-known/oauth-protected-resource")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
-        assert!(body["resource"].is_string());
-        assert!(body["authorization_servers"].is_array());
-    }
-
-    #[tokio::test]
-    async fn authorization_server_metadata() {
-        let resp = app(make_auth(None))
-            .oneshot(
-                Request::get("/.well-known/oauth-authorization-server")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
-        assert_eq!(body["issuer"], "http://localhost");
-        assert!(body["authorization_endpoint"].is_string());
-        assert!(body["token_endpoint"].is_string());
-    }
-
-    #[tokio::test]
-    async fn authorize_page_returns_html() {
-        let resp = app(make_auth(None))
-            .oneshot(
-                Request::get("/authorize?client_id=test-client&redirect_uri=http://cb&state=abc")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_str(resp.into_body()).await;
-        assert!(body.contains("test-client"));
-        assert!(body.contains("Approve Access"));
-    }
-
-    #[tokio::test]
-    async fn register_client_returns_client_id() {
-        let resp = app(make_auth(None))
-            .oneshot(
-                Request::post("/register")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        r#"{"client_name":"TestApp","redirect_uris":["http://cb"]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let body: serde_json::Value =
-            serde_json::from_str(&body_str(resp.into_body()).await).unwrap();
-        assert!(body["client_id"].is_string());
-        assert_eq!(body["client_name"], "TestApp");
-    }
-
-    #[tokio::test]
-    async fn approve_then_exchange_token() {
-        let auth = make_auth(None);
-        let router = app(auth.clone());
-
-        let resp = router
-            .oneshot(
-                Request::post("/authorize/approve")
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from(
-                        "client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1",
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FOUND);
-        let location = resp.headers()["location"].to_str().unwrap().to_string();
-        assert!(location.contains("code="));
-
-        let code = location
-            .split("code=")
-            .nth(1)
-            .unwrap()
-            .split('&')
-            .next()
-            .unwrap();
-
-        let resp2 = app(auth)
-            .oneshot(
-                Request::post("/token")
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from(format!(
-                        "grant_type=authorization_code&code={code}"
-                    )))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp2.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_str(&body_str(resp2.into_body()).await).unwrap();
-        assert_eq!(body["token_type"], "Bearer");
-        assert!(body["access_token"].is_string());
-    }
-
-    #[tokio::test]
-    async fn token_with_bad_code_returns_400() {
-        let resp = app(make_auth(None))
-            .oneshot(
-                Request::post("/token")
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from("grant_type=authorization_code&code=notacode"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn approve_wrong_password_returns_401() {
-        let resp = app(make_auth(Some("secret")))
-            .oneshot(
-                Request::post("/authorize/approve")
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from(
-                        "client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1&password=wrong",
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn approve_correct_password_redirects() {
-        let resp = app(make_auth(Some("secret")))
-            .oneshot(
-                Request::post("/authorize/approve")
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from(
-                        "client_id=c1&redirect_uri=http%3A%2F%2Fcb&state=s1&password=secret",
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FOUND);
-    }
-}

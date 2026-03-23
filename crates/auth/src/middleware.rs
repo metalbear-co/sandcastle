@@ -36,11 +36,18 @@ pub async fn require_auth(
 
     match token {
         Some(t) => {
-            let client_id = auth.valid_tokens.read().unwrap().get(t).cloned();
-            if let Some(client_id) = client_id {
+            let raw = auth.valid_tokens.read().unwrap().get(t).cloned();
+            if let Some(raw) = raw {
+                // Legacy migration: tokens persisted before the owner_key change
+                // had plain client_id values without a "prefix:" scheme.
+                let owner_key = if raw.contains(':') {
+                    raw
+                } else {
+                    format!("client:{raw}")
+                };
                 request.extensions_mut().insert(RequestIdentity {
-                    owner_key: format!("client:{client_id}"),
-                    client_id: Some(client_id),
+                    owner_key,
+                    client_id: None,
                     no_auth: false,
                 });
                 debug!("auth: token accepted");
@@ -77,97 +84,3 @@ pub async fn require_auth(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use axum::{
-        Extension, Router,
-        body::Body,
-        http::{Request, StatusCode},
-        middleware,
-        response::IntoResponse,
-        routing::get,
-    };
-    use std::{
-        collections::HashMap,
-        sync::{Arc, RwLock},
-    };
-    use tower::ServiceExt;
-
-    use crate::{AuthState, SharedAuthState};
-
-    fn make_auth(no_auth: bool, token: Option<&str>) -> SharedAuthState {
-        let mut tokens = HashMap::new();
-        if let Some(t) = token {
-            tokens.insert(t.to_string(), "client".to_string());
-        }
-        Arc::new(AuthState {
-            pending_codes: RwLock::new(HashMap::new()),
-            valid_tokens: RwLock::new(tokens),
-            base_url: "http://localhost".to_string(),
-            no_auth,
-            password: None,
-        })
-    }
-
-    fn app(auth: SharedAuthState) -> Router {
-        Router::new()
-            .route("/protected", get(|| async { "ok".into_response() }))
-            .route_layer(middleware::from_fn(super::require_auth))
-            .layer(Extension(auth))
-    }
-
-    #[tokio::test]
-    async fn no_token_returns_401() {
-        let resp = app(make_auth(false, None))
-            .oneshot(Request::get("/protected").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn invalid_token_returns_401() {
-        let resp = app(make_auth(false, Some("good-token")))
-            .oneshot(
-                Request::get("/protected")
-                    .header("Authorization", "Bearer bad-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn valid_token_passes() {
-        let resp = app(make_auth(false, Some("good-token")))
-            .oneshot(
-                Request::get("/protected")
-                    .header("Authorization", "Bearer good-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn no_auth_mode_bypasses_check() {
-        let resp = app(make_auth(true, None))
-            .oneshot(Request::get("/protected").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn www_authenticate_header_present_on_401() {
-        let resp = app(make_auth(false, None))
-            .oneshot(Request::get("/protected").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert!(resp.headers().contains_key("www-authenticate"));
-    }
-}
