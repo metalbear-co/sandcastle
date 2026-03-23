@@ -1,5 +1,3 @@
-use std::time::{Duration, Instant};
-
 use axum::{
     Json,
     extract::{Extension, Form, Query},
@@ -9,9 +7,10 @@ use axum::{
 use serde::Deserialize;
 use tracing::debug;
 
+use sandcastle_store::types::now_secs;
 use sandcastle_util::generate_token;
 
-use super::{PendingAuthRequest, PendingCode, SharedAuthState, persist_tokens};
+use super::{PendingAuthRecord, PendingCodeRecord, SharedAuthState};
 
 #[derive(Deserialize)]
 pub struct AuthorizeParams {
@@ -147,23 +146,28 @@ pub async fn authorize_page(
     let callback_url = format!("{}/auth/callback", auth.base_url);
 
     if let Some(idp_url) = auth.provider.redirect_url(&callback_url, &server_state) {
-        auth.pending_auth_requests.write().unwrap().insert(
-            server_state,
-            PendingAuthRequest {
-                client_id,
-                redirect_uri: if redirect_uri.is_empty() {
-                    None
-                } else {
-                    Some(redirect_uri)
-                },
-                client_state: if client_state.is_empty() {
-                    None
-                } else {
-                    Some(client_state)
-                },
-                created_at: Instant::now(),
+        let record = PendingAuthRecord {
+            client_id,
+            redirect_uri: if redirect_uri.is_empty() {
+                None
+            } else {
+                Some(redirect_uri)
             },
-        );
+            client_state: if client_state.is_empty() {
+                None
+            } else {
+                Some(client_state)
+            },
+            expire_at: now_secs() + 600,
+        };
+        if let Err(e) = auth
+            .store
+            .set_pending_auth_request(&server_state, &record)
+            .await
+        {
+            tracing::warn!("authorize_page: failed to store pending auth: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
+        }
         return (StatusCode::FOUND, [("Location", idp_url)]).into_response();
     }
 
@@ -208,17 +212,15 @@ pub async fn authorize_approve(
     let redirect_uri = form.redirect_uri.clone();
     let owner_key = format!("client:{client_id}");
 
-    {
-        let mut codes = auth.pending_codes.write().unwrap();
-        codes.insert(
-            code.clone(),
-            PendingCode {
-                created_at: Instant::now(),
-                redirect_uri: redirect_uri.clone(),
-                client_id: client_id.clone(),
-                owner_key,
-            },
-        );
+    let record = PendingCodeRecord {
+        expire_at: now_secs() + 300,
+        redirect_uri: redirect_uri.clone(),
+        client_id: client_id.clone(),
+        owner_key,
+    };
+    if let Err(e) = auth.store.set_pending_code(&code, &record).await {
+        tracing::warn!("authorize_approve: failed to store pending code: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
     }
 
     let base_redirect = redirect_uri.unwrap_or_else(|| format!("{}/", auth.base_url));
@@ -262,21 +264,20 @@ pub async fn auth_callback(
         }
     };
 
-    let pending = auth.pending_auth_requests.write().unwrap().remove(&state);
-    let pending = match pending {
-        Some(p) => p,
-        None => {
+    let pending = match auth.store.take_pending_auth_request(&state).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
             return (
                 StatusCode::BAD_REQUEST,
                 "Unknown or expired authorization state",
             )
                 .into_response();
         }
+        Err(e) => {
+            tracing::warn!("auth_callback: store error: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
+        }
     };
-
-    if pending.created_at.elapsed() > Duration::from_secs(600) {
-        return (StatusCode::BAD_REQUEST, "Authorization request expired").into_response();
-    }
 
     let callback_url = format!("{}/auth/callback", auth.base_url);
     let owner_key = match auth.provider.exchange_code(&code, &callback_url).await {
@@ -292,17 +293,15 @@ pub async fn auth_callback(
     };
 
     let auth_code = generate_token();
-    {
-        let mut codes = auth.pending_codes.write().unwrap();
-        codes.insert(
-            auth_code.clone(),
-            PendingCode {
-                created_at: Instant::now(),
-                redirect_uri: pending.redirect_uri.clone(),
-                client_id: pending.client_id.clone(),
-                owner_key: owner_key.clone(),
-            },
-        );
+    let code_record = PendingCodeRecord {
+        expire_at: now_secs() + 300,
+        redirect_uri: pending.redirect_uri.clone(),
+        client_id: pending.client_id.clone(),
+        owner_key: owner_key.clone(),
+    };
+    if let Err(e) = auth.store.set_pending_code(&auth_code, &code_record).await {
+        tracing::warn!("auth_callback: failed to store pending code: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
     }
 
     let base_redirect = pending
@@ -327,9 +326,18 @@ pub async fn token_endpoint(
     Extension(auth): Extension<SharedAuthState>,
     Form(req): Form<TokenRequest>,
 ) -> impl IntoResponse {
-    let code_data = {
-        let mut codes = auth.pending_codes.write().unwrap();
-        codes.remove(&req.code)
+    let code_data = match auth.store.take_pending_code(&req.code).await {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::warn!("token_endpoint: store error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "server_error",
+                    "error_description": "Internal error"
+                })),
+            );
+        }
     };
 
     match code_data {
@@ -340,20 +348,19 @@ pub async fn token_endpoint(
                 "error_description": "Code not found or already used"
             })),
         ),
-        Some(c) if c.created_at.elapsed() > Duration::from_secs(300) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_grant",
-                "error_description": "Code expired"
-            })),
-        ),
         Some(c) => {
             let token = generate_token();
-            {
-                let mut tokens = auth.valid_tokens.write().unwrap();
-                tokens.insert(token.clone(), c.owner_key.clone());
-                persist_tokens(&tokens);
+            if let Err(e) = auth.store.set_token(&token, &c.owner_key).await {
+                tracing::warn!("token_endpoint: failed to store token: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "server_error",
+                        "error_description": "Internal error"
+                    })),
+                );
             }
+            auth.on_tokens_changed().await;
             debug!(
                 "token: issued {token:.8}... for owner {:.16}...",
                 c.owner_key
@@ -388,4 +395,3 @@ pub async fn register_client(
         })),
     )
 }
-

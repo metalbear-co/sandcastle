@@ -9,6 +9,15 @@ sandcastle-util = { path = "../util" }
 sandcastle-keychain = { path = "../keychain" }
 sandcastle-auth = { path = "../auth" }
 sandcastle-sandbox-providers = { path = "../sandbox_providers" }
+sandcastle-sandbox-provider-local = { path = "../sandbox_provider_local" }
+sandcastle-sandbox-provider-docker = { path = "../sandbox_provider_docker" }
+sandcastle-sandbox-provider-daytona = { path = "../sandbox_provider_daytona" }
+sandcastle-store = { path = "../store" }
+sandcastle-store-memory = { path = "../store_memory" }
+sandcastle-store-postgres = { path = "../store_postgres" }
+sandcastle-secrets = { path = "../secrets" }
+sandcastle-secrets-memory = { path = "../secrets_memory" }
+sandcastle-secrets-gcp = { path = "../secrets_gcp" }
 rmcp = { version = "1.2.0", features = ["server", "macros", "transport-streamable-http-server"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
@@ -18,7 +27,6 @@ serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

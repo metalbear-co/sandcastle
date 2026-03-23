@@ -7,6 +7,7 @@ license = "MIT"
 [dependencies]
 sandcastle-util = { path = "../util" }
 sandcastle-keychain = { path = "../keychain" }
+sandcastle-store = { path = "../store" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

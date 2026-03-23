@@ -36,7 +36,7 @@ pub async fn require_auth(
 
     match token {
         Some(t) => {
-            let raw = auth.valid_tokens.read().unwrap().get(t).cloned();
+            let raw = auth.store.get_token(t).await.unwrap_or(None);
             if let Some(raw) = raw {
                 // Legacy migration: tokens persisted before the owner_key change
                 // had plain client_id values without a "prefix:" scheme.
@@ -83,4 +83,3 @@ pub async fn require_auth(
         }
     }
 }
-

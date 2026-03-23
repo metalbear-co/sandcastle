@@ -1,0 +1,15 @@
+[package]
+name = "sandcastle-sandbox-provider-docker"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+sandcastle-sandbox-providers = { path = "../sandbox_providers" }
+sandcastle-util = { path = "../util" }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+tracing = "0.1"
+serde_json = "1"
+bollard = "0.18"
+futures-util = "0.3"

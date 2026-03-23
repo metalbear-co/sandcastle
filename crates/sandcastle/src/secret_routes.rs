@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::{
     Extension,
     body::Bytes,
@@ -8,17 +6,17 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::secrets::SecretStore;
+use sandcastle_secrets::SharedSecretBackend;
 
 #[derive(Clone)]
 pub struct BaseUrl(pub String);
 
 pub async fn get_secret_page(
     Path(token): Path<String>,
-    Extension(store): Extension<Arc<SecretStore>>,
+    Extension(store): Extension<SharedSecretBackend>,
     Extension(BaseUrl(base_url)): Extension<BaseUrl>,
 ) -> impl IntoResponse {
-    let Some((_, name)) = store.get_token_info(&token) else {
+    let Some((_, name)) = store.get_token_info(&token).await else {
         return (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -68,7 +66,7 @@ pub async fn get_secret_page(
 
 pub async fn post_secret_value(
     Path(token): Path<String>,
-    Extension(store): Extension<Arc<SecretStore>>,
+    Extension(store): Extension<SharedSecretBackend>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -101,7 +99,7 @@ pub async fn post_secret_value(
         );
     }
 
-    match store.consume_token_and_store(&token, &value) {
+    match store.consume_token_and_store(&token, &value).await {
         Ok(name) => {
             let wants_html = headers
                 .get(header::ACCEPT)

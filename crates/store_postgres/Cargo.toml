@@ -1,0 +1,13 @@
+[package]
+name = "sandcastle-store-postgres"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+sandcastle-store = { path = "../store" }
+async-trait = "0.1"
+anyhow = "1"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "derive"] }
+tokio = { version = "1", features = ["time"] }
+tracing = "0.1"

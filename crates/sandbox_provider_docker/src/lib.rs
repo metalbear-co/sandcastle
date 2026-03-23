@@ -21,7 +21,7 @@ use tokio::{
     sync::{RwLock, mpsc, oneshot},
 };
 
-use crate::{Provider, SandboxHandle, SandboxMessage};
+use sandcastle_sandbox_providers::{Provider, SandboxHandle, SandboxMessage};
 use sandcastle_util::generate_token;
 
 const WORK_DIR: &str = "/workspace";
@@ -207,14 +207,9 @@ impl DockerSandbox {
 
     async fn glob(&self, pattern: &str, base_path: Option<String>) -> String {
         let base = base_path.as_deref().unwrap_or(WORK_DIR);
-        // Derive find(1) arguments from the glob pattern.
-        // Patterns like **/*.rs  → recursive find with -name '*.rs'
-        // Patterns like *.rs     → non-recursive (maxdepth 1) with -name '*.rs'
         let (search_base, name_pat, recursive) = {
             let recursive = pattern.contains("**");
-            // The name filter is the last path component of the pattern.
             let name = pattern.split('/').next_back().unwrap_or(pattern);
-            // The directory prefix before the first `**` component.
             let prefix = pattern
                 .split("**/")
                 .next()
@@ -259,7 +254,7 @@ impl DockerSandbox {
         &self,
         command: &str,
         dir: Option<String>,
-        env: std::collections::HashMap<String, String>,
+        env: HashMap<String, String>,
         output_tx: mpsc::Sender<String>,
         reply: oneshot::Sender<i32>,
     ) {

@@ -1,9 +1,10 @@
 [package]
-name = "sandcastle-sandbox-providers"
+name = "sandcastle-store-memory"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
 [dependencies]
-tokio = { version = "1", features = ["sync"] }
+sandcastle-store = { path = "../store" }
 async-trait = "0.1"
+anyhow = "1"

@@ -3,23 +3,27 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use async_trait::async_trait;
+use sandcastle_secrets::SecretBackend;
 use sandcastle_util::generate_token;
 
 #[derive(Default)]
-pub struct SecretStore {
+pub struct MemorySecretBackend {
     // magic token -> (owner_key, secret_name)
     pending_tokens: RwLock<HashMap<String, (String, String)>>,
     // owner_key -> (name -> value)
     secrets: RwLock<HashMap<String, HashMap<String, String>>>,
 }
 
-impl SecretStore {
+impl MemorySecretBackend {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
+}
 
-    /// Create a one-time upload token for the given owner and secret name.
-    pub fn create_upload_token(&self, owner_key: &str, name: &str) -> String {
+#[async_trait]
+impl SecretBackend for MemorySecretBackend {
+    async fn create_upload_token(&self, owner_key: &str, name: &str) -> String {
         let token = generate_token();
         self.pending_tokens
             .write()
@@ -28,8 +32,7 @@ impl SecretStore {
         token
     }
 
-    /// Look up a pending token without consuming it (for rendering the upload page).
-    pub fn get_token_info(&self, token: &str) -> Option<(String, String)> {
+    async fn get_token_info(&self, token: &str) -> Option<(String, String)> {
         self.pending_tokens
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -37,8 +40,7 @@ impl SecretStore {
             .cloned()
     }
 
-    /// Validate the token, store the secret value, and consume the token.
-    pub fn consume_token_and_store(&self, token: &str, value: &str) -> Result<String, String> {
+    async fn consume_token_and_store(&self, token: &str, value: &str) -> Result<String, String> {
         let (owner_key, name) = self
             .pending_tokens
             .write()
@@ -54,8 +56,7 @@ impl SecretStore {
         Ok(name)
     }
 
-    /// List the names of all stored secrets for an owner (values are never returned).
-    pub fn list_secrets(&self, owner_key: &str) -> Vec<String> {
+    async fn list_secrets(&self, owner_key: &str) -> Vec<String> {
         self.secrets
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -64,8 +65,7 @@ impl SecretStore {
             .unwrap_or_default()
     }
 
-    /// Retrieve a stored secret value.
-    pub fn get_secret(&self, owner_key: &str, name: &str) -> Option<String> {
+    async fn get_secret(&self, owner_key: &str, name: &str) -> Option<String> {
         self.secrets
             .read()
             .unwrap_or_else(|e| e.into_inner())

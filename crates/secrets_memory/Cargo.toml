@@ -1,0 +1,10 @@
+[package]
+name = "sandcastle-secrets-memory"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+sandcastle-secrets = { path = "../secrets" }
+sandcastle-util = { path = "../util" }
+async-trait = "0.1"

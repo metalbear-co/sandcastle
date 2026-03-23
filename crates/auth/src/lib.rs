@@ -4,39 +4,21 @@ pub mod middleware;
 pub mod provider;
 pub mod providers;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::Instant,
-};
+use std::sync::Arc;
 
 use sandcastle_keychain::{StoredConfig, load_config, save_config};
+use sandcastle_store::SharedStateStore;
 
-use provider::SharedAuthProvider;
-
-pub struct PendingCode {
-    pub created_at: Instant,
-    pub redirect_uri: Option<String>,
-    pub client_id: String,
-    pub owner_key: String,
-}
-
-pub struct PendingAuthRequest {
-    pub client_id: String,
-    pub redirect_uri: Option<String>,
-    pub client_state: Option<String>,
-    pub created_at: Instant,
-}
+pub use provider::SharedAuthProvider;
+pub use sandcastle_store::{PendingAuthRecord, PendingCodeRecord};
 
 pub struct AuthState {
-    pub pending_codes: RwLock<HashMap<String, PendingCode>>,
-    /// token → owner_key (e.g. "client:abc", "github:12345", "google:sub")
-    pub valid_tokens: RwLock<HashMap<String, String>>,
-    /// server-side state → pending IdP auth request
-    pub pending_auth_requests: RwLock<HashMap<String, PendingAuthRequest>>,
+    pub store: SharedStateStore,
     pub base_url: String,
     pub no_auth: bool,
     pub provider: SharedAuthProvider,
+    /// When true, token mutations are persisted to the OS keychain (memory-mode only).
+    pub persist_to_keychain: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -48,13 +30,25 @@ pub struct RequestIdentity {
 
 pub type SharedAuthState = Arc<AuthState>;
 
-/// Load any tokens persisted from a previous run.
-pub fn load_persisted_tokens(config: &StoredConfig) -> HashMap<String, String> {
+impl AuthState {
+    /// Called after a token is written. Persists to keychain when in memory mode.
+    pub async fn on_tokens_changed(&self) {
+        if !self.persist_to_keychain {
+            return;
+        }
+        if let Ok(tokens) = self.store.all_tokens().await {
+            persist_tokens(&tokens);
+        }
+    }
+}
+
+/// Load any tokens persisted from a previous run (used to seed MemoryStore).
+pub fn load_persisted_tokens(config: &StoredConfig) -> std::collections::HashMap<String, String> {
     config.valid_tokens.clone().unwrap_or_default()
 }
 
 /// Persist the current token map to the keychain (best-effort).
-pub fn persist_tokens(tokens: &HashMap<String, String>) {
+pub fn persist_tokens(tokens: &std::collections::HashMap<String, String>) {
     let mut config = load_config();
     config.valid_tokens = Some(tokens.clone());
     if let Err(e) = save_config(&config) {

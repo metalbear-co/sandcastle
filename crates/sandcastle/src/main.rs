@@ -1,13 +1,8 @@
 mod config;
 mod handler;
 mod secret_routes;
-mod secrets;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use axum::{
@@ -30,13 +25,19 @@ use sandcastle_auth::providers::{
     github::GitHubAuthProvider, google::GoogleAuthProvider, local::LocalAuthProvider,
 };
 use sandcastle_auth::{AuthState, SharedAuthState, load_persisted_tokens};
-use sandcastle_sandbox_providers::{
-    Provider, daytona::DaytonaProvider, docker::DockerProvider, local::LocalProvider,
-};
+use sandcastle_sandbox_provider_daytona::{DaytonaProvider, load_daytona_creds};
+use sandcastle_sandbox_provider_docker::DockerProvider;
+use sandcastle_sandbox_provider_local::LocalProvider;
+use sandcastle_sandbox_providers::Provider;
+use sandcastle_secrets::SharedSecretBackend;
+use sandcastle_secrets_gcp::GcpSecretManagerBackend;
+use sandcastle_secrets_memory::MemorySecretBackend;
+use sandcastle_store::SharedStateStore;
+use sandcastle_store_memory::MemoryStore;
+use sandcastle_store_postgres::{PostgresStore, start_cleanup_task};
 
-use handler::{SandboxRegistry, SandcastleHandler};
+use handler::SandcastleHandler;
 use secret_routes::BaseUrl;
-use secrets::SecretStore;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,6 +59,47 @@ async fn main() -> Result<()> {
     let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
 
     let stored_config = sandcastle_keychain::load_config();
+
+    // ── Storage backend ───────────────────────────────────────────────────────
+
+    let store: SharedStateStore = match std::env::var("STORAGE_BACKEND")
+        .unwrap_or_default()
+        .as_str()
+    {
+        "postgres" => {
+            let url = std::env::var("DATABASE_URL").map_err(|_| {
+                anyhow::anyhow!("DATABASE_URL is required for STORAGE_BACKEND=postgres")
+            })?;
+            info!("storage: using PostgreSQL backend");
+            let pg = PostgresStore::new(&url).await?;
+            start_cleanup_task(pg.pool.clone());
+            Arc::new(pg)
+        }
+        _ => {
+            info!("storage: using in-memory backend");
+            let initial_tokens = load_persisted_tokens(&stored_config);
+            MemoryStore::new(initial_tokens)
+        }
+    };
+
+    // ── Secret backend ────────────────────────────────────────────────────────
+
+    let secret_backend: SharedSecretBackend =
+        match std::env::var("SECRET_BACKEND").unwrap_or_default().as_str() {
+            "gcp" => {
+                let project_id = std::env::var("GCP_PROJECT_ID").map_err(|_| {
+                    anyhow::anyhow!("GCP_PROJECT_ID is required for SECRET_BACKEND=gcp")
+                })?;
+                info!("secrets: using GCP Secret Manager backend (project={project_id})");
+                Arc::new(GcpSecretManagerBackend::new(project_id, store.clone()))
+            }
+            _ => {
+                info!("secrets: using in-memory backend");
+                MemorySecretBackend::new()
+            }
+        };
+
+    // ── Auth provider ─────────────────────────────────────────────────────────
 
     let auth_provider: SharedAuthProvider = if no_auth {
         Arc::new(LocalAuthProvider { password: None })
@@ -106,13 +148,14 @@ async fn main() -> Result<()> {
         }
     };
 
+    let persist_to_keychain = std::env::var("STORAGE_BACKEND").unwrap_or_default() != "postgres";
+
     let auth_state: SharedAuthState = Arc::new(AuthState {
-        pending_codes: RwLock::new(HashMap::new()),
-        valid_tokens: RwLock::new(load_persisted_tokens(&stored_config)),
-        pending_auth_requests: RwLock::new(HashMap::new()),
+        store: store.clone(),
         base_url: base_url.clone(),
         no_auth,
         provider: auth_provider,
+        persist_to_keychain,
     });
 
     if no_auth {
@@ -121,18 +164,24 @@ async fn main() -> Result<()> {
 
     if !no_auth {
         if let Ok(token) = std::env::var("MCP_TOKEN") {
-            auth_state
-                .valid_tokens
-                .write()
-                .unwrap()
-                .insert(token, "client:mcp_token_user".to_string());
+            if let Err(e) = store.set_token(&token, "client:mcp_token_user").await {
+                tracing::warn!("failed to register MCP_TOKEN: {e}");
+            }
             info!("auth: using pre-shared token from MCP_TOKEN");
         } else {
             info!("auth: open {base_url}/authorize to approve MCP access");
         }
     }
 
-    let mut enabled = config::load_provider_selection()?;
+    // ── Sandbox providers ─────────────────────────────────────────────────────
+
+    let mut enabled = match std::env::var("SANDCASTLE_PROVIDERS") {
+        Ok(val) => val
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>(),
+        Err(_) => config::load_provider_selection()?,
+    };
     if std::env::var("DAYTONA_API_KEY").is_ok() && !enabled.contains(&"daytona".to_string()) {
         enabled.push("daytona".to_string());
     }
@@ -159,7 +208,7 @@ async fn main() -> Result<()> {
     }
 
     if enabled.contains(&"daytona".to_string()) {
-        match sandcastle_sandbox_providers::daytona_auth::load_daytona_creds(&stored_config) {
+        match load_daytona_creds(&stored_config) {
             Ok(creds) => {
                 match DaytonaProvider::new(
                     creds.api_key,
@@ -178,18 +227,18 @@ async fn main() -> Result<()> {
         }
     }
 
-    let sandbox_registry = Arc::new(SandboxRegistry::default());
-    let secret_store = SecretStore::new();
+    // ── MCP service ───────────────────────────────────────────────────────────
 
     let service = StreamableHttpService::new(
         {
-            let secret_store = secret_store.clone();
+            let secret_backend = secret_backend.clone();
+            let store = store.clone();
             let base_url = base_url.clone();
             move || {
                 Ok(SandcastleHandler::new(
-                    sandbox_registry.clone(),
+                    store.clone(),
                     providers.clone(),
-                    secret_store.clone(),
+                    secret_backend.clone(),
                     base_url.clone(),
                 ))
             }
@@ -220,7 +269,7 @@ async fn main() -> Result<()> {
             "/secrets/{token}",
             get(secret_routes::get_secret_page).post(secret_routes::post_secret_value),
         )
-        .layer(Extension(secret_store))
+        .layer(Extension(secret_backend))
         .layer(Extension(BaseUrl(base_url.clone())))
         .layer(Extension(auth_state))
         .layer(CorsLayer::permissive())

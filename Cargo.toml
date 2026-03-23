@@ -1,10 +1,19 @@
 [workspace]
 members = [
     "crates/sandcastle",
+    "crates/store",
     "crates/util",
     "crates/keychain",
     "crates/auth",
     "crates/sandbox_providers",
+    "crates/sandbox_provider_local",
+    "crates/sandbox_provider_docker",
+    "crates/sandbox_provider_daytona",
+    "crates/store_memory",
+    "crates/store_postgres",
+    "crates/secrets",
+    "crates/secrets_memory",
+    "crates/secrets_gcp",
     "tooling/xtask",
 ]
 resolver = "3"

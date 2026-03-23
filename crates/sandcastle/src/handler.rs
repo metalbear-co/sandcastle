@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::collections::HashMap;
 
 use anyhow::Result;
 use rmcp::{
@@ -20,8 +17,12 @@ use serde::Deserialize;
 
 use sandcastle_auth::RequestIdentity;
 use sandcastle_sandbox_providers::{Provider, SandboxHandle};
+use sandcastle_store::{
+    SharedStateStore,
+    types::{SandboxRecord, now_secs},
+};
 
-use crate::secrets::SecretStore;
+use sandcastle_secrets::SharedSecretBackend;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CreateSandboxParams {
@@ -136,43 +137,27 @@ struct ListSandboxesParams {
 }
 
 #[derive(Clone)]
-pub struct SandboxMeta {
-    pub id: String,
-    pub name: String,
-    pub provider: String,
-    pub work_dir: String,
-    pub owner: String,
-}
-
-#[derive(Default)]
-pub struct SandboxRegistry {
-    owners: RwLock<HashMap<String, String>>,
-    active_by_owner: RwLock<HashMap<String, String>>,
-    sandboxes: RwLock<HashMap<String, SandboxMeta>>,
-}
-
-#[derive(Clone)]
 pub struct SandcastleHandler {
     tool_router: ToolRouter<Self>,
-    sandbox_registry: Arc<SandboxRegistry>,
-    providers: Vec<Arc<dyn Provider>>,
-    secret_store: Arc<SecretStore>,
+    store: SharedStateStore,
+    providers: Vec<std::sync::Arc<dyn Provider>>,
+    secrets: SharedSecretBackend,
     base_url: String,
 }
 
 #[tool_router]
 impl SandcastleHandler {
     pub fn new(
-        sandbox_registry: Arc<SandboxRegistry>,
-        providers: Vec<Arc<dyn Provider>>,
-        secret_store: Arc<SecretStore>,
+        store: SharedStateStore,
+        providers: Vec<std::sync::Arc<dyn Provider>>,
+        secrets: SharedSecretBackend,
         base_url: String,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            sandbox_registry,
+            store,
             providers,
-            secret_store,
+            secrets,
             base_url,
         }
     }
@@ -187,31 +172,6 @@ impl SandcastleHandler {
                 client_id: None,
                 no_auth: false,
             })
-    }
-
-    fn set_active_sandbox(&self, identity: &RequestIdentity, sandbox_id: &str) {
-        self.sandbox_registry
-            .owners
-            .write()
-            .unwrap()
-            .insert(sandbox_id.to_string(), identity.owner_key.clone());
-        self.sandbox_registry
-            .active_by_owner
-            .write()
-            .unwrap()
-            .insert(identity.owner_key.clone(), sandbox_id.to_string());
-    }
-
-    fn is_owned_by(&self, identity: &RequestIdentity, sandbox_id: &str) -> bool {
-        if identity.no_auth {
-            return true;
-        }
-        self.sandbox_registry
-            .owners
-            .read()
-            .unwrap()
-            .get(sandbox_id)
-            .is_some_and(|owner| owner == &identity.owner_key)
     }
 
     fn sandbox_summary_json(id: &str, name: &str, path: &str) -> String {
@@ -230,31 +190,15 @@ impl SandcastleHandler {
         .to_string()
     }
 
-    fn clear_sandbox_tracking(&self, sandbox_id: &str) {
-        self.sandbox_registry
-            .owners
-            .write()
-            .unwrap()
-            .remove(sandbox_id);
-        self.sandbox_registry
-            .active_by_owner
-            .write()
-            .unwrap()
-            .retain(|_, active_id| active_id != sandbox_id);
-        self.sandbox_registry
-            .sandboxes
-            .write()
-            .unwrap()
-            .remove(sandbox_id);
-    }
-
     async fn resume_known_sandbox(&self, sandbox_id: &str) -> Result<SandboxHandle, String> {
         for p in &self.providers {
             if let Ok(handle) = p.resume(sandbox_id).await {
                 return Ok(handle);
             }
         }
-        self.clear_sandbox_tracking(sandbox_id);
+        if let Err(e) = self.store.remove_sandbox(sandbox_id).await {
+            tracing::warn!("failed to remove stale sandbox {sandbox_id}: {e}");
+        }
         Err(format!("Sandbox {sandbox_id} not found or has expired"))
     }
 
@@ -266,12 +210,10 @@ impl SandcastleHandler {
         let sandbox_id = match sandbox_id {
             Some(id) => id.to_string(),
             None => self
-                .sandbox_registry
-                .active_by_owner
-                .read()
-                .unwrap()
-                .get(&identity.owner_key)
-                .cloned()
+                .store
+                .get_active_sandbox(&identity.owner_key)
+                .await
+                .unwrap_or(None)
                 .ok_or_else(|| {
                     "Error: no sandbox active for this client. Call create_sandbox, \
                      resume_sandbox, or pass sandbox_id."
@@ -279,7 +221,16 @@ impl SandcastleHandler {
                 })?,
         };
 
-        if !self.is_owned_by(identity, &sandbox_id) {
+        let owned = if identity.no_auth {
+            true
+        } else {
+            self.store
+                .sandbox_owned_by(&sandbox_id, &identity.owner_key)
+                .await
+                .unwrap_or(false)
+        };
+
+        if !owned {
             return Err(format!(
                 "Error: sandbox {sandbox_id} is not accessible to this client."
             ));
@@ -322,17 +273,27 @@ impl SandcastleHandler {
                     let id = handle.id.clone();
                     let name = handle.name.clone();
                     let path = handle.work_dir.display().to_string();
-                    self.set_active_sandbox(&identity, &id);
-                    self.sandbox_registry.sandboxes.write().unwrap().insert(
-                        id.clone(),
-                        SandboxMeta {
-                            id: id.clone(),
-                            name: name.clone(),
-                            provider: provider.clone(),
-                            work_dir: path.clone(),
-                            owner: identity.owner_key.clone(),
-                        },
-                    );
+                    let record = SandboxRecord {
+                        id: id.clone(),
+                        name: name.clone(),
+                        provider: provider.clone(),
+                        work_dir: path.clone(),
+                        owner_key: identity.owner_key.clone(),
+                        created_at: now_secs(),
+                    };
+                    if let Err(e) = self.store.register_sandbox(&record).await {
+                        tracing::warn!("failed to register sandbox {id}: {e}");
+                    }
+                    if let Err(e) = self
+                        .store
+                        .set_active_sandbox(&identity.owner_key, &id)
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to set active sandbox for {}: {e}",
+                            identity.owner_key
+                        );
+                    }
                     Self::sandbox_summary_json(&id, &name, &path)
                 }
             },
@@ -348,10 +309,15 @@ impl SandcastleHandler {
         Parameters(ListSandboxesParams { provider }): Parameters<ListSandboxesParams>,
     ) -> String {
         let identity = Self::request_identity(&ctx);
-        let sandboxes = self.sandbox_registry.sandboxes.read().unwrap();
+        let sandboxes = match self.store.list_sandboxes(&identity.owner_key).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("list_sandboxes: store error: {e}");
+                return Self::error_json("Failed to list sandboxes");
+            }
+        };
         let list: Vec<serde_json::Value> = sandboxes
-            .values()
-            .filter(|s| s.owner == identity.owner_key)
+            .iter()
             .filter(|s| match &provider {
                 Some(p) => &s.provider == p,
                 None => true,
@@ -378,7 +344,15 @@ impl SandcastleHandler {
         Parameters(ResumeSandboxParams { id }): Parameters<ResumeSandboxParams>,
     ) -> String {
         let identity = Self::request_identity(&ctx);
-        if !self.is_owned_by(&identity, &id) {
+        let owned = if identity.no_auth {
+            true
+        } else {
+            self.store
+                .sandbox_owned_by(&id, &identity.owner_key)
+                .await
+                .unwrap_or(false)
+        };
+        if !owned {
             return Self::error_json(&format!(
                 "Error: sandbox {id} is not accessible to this client."
             ));
@@ -387,7 +361,13 @@ impl SandcastleHandler {
             Ok(handle) => {
                 let path = handle.work_dir.display().to_string();
                 let name = handle.name.clone();
-                self.set_active_sandbox(&identity, &id);
+                if let Err(e) = self
+                    .store
+                    .set_active_sandbox(&identity.owner_key, &id)
+                    .await
+                {
+                    tracing::warn!("resume_sandbox: set_active_sandbox failed: {e}");
+                }
                 Self::sandbox_summary_json(&id, &name, &path)
             }
             Err(e) => Self::error_json(&e),
@@ -511,8 +491,9 @@ impl SandcastleHandler {
         if let Some(secret_map) = secrets {
             for (env_key, secret_name) in secret_map {
                 match self
-                    .secret_store
+                    .secrets
                     .get_secret(&identity.owner_key, &secret_name)
+                    .await
                 {
                     Some(val) => {
                         env.insert(env_key, val);
@@ -566,7 +547,7 @@ impl SandcastleHandler {
     )]
     async fn list_secrets(&self, ctx: RequestContext<RoleServer>) -> String {
         let identity = Self::request_identity(&ctx);
-        let names = self.secret_store.list_secrets(&identity.owner_key);
+        let names = self.secrets.list_secrets(&identity.owner_key).await;
         serde_json::to_string(&names).unwrap_or_default()
     }
 
@@ -580,8 +561,9 @@ impl SandcastleHandler {
     ) -> String {
         let identity = Self::request_identity(&ctx);
         let token = self
-            .secret_store
-            .create_upload_token(&identity.owner_key, &name);
+            .secrets
+            .create_upload_token(&identity.owner_key, &name)
+            .await;
         let url = format!("{}/secrets/{}", self.base_url, token);
         serde_json::json!({
             "url": url,
