@@ -20,7 +20,7 @@ pub async fn load(store: SharedStateStore) -> Result<SharedSecretBackend> {
         }
         "k8s" => {
             let namespace =
-                std::env::var("K8S_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+                std::env::var("K8S_NAMESPACE").unwrap_or_else(|_| "sandcastle".to_string());
             info!("secrets: using Kubernetes Secrets backend (namespace={namespace})");
             Ok(std::sync::Arc::new(
                 K8sSecretBackend::new(namespace, store).await?,

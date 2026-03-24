@@ -41,4 +41,4 @@ Sandcastle is configured via environment variables.
 |----------|--------|---------|---------|
 | `SECRET_BACKEND` | `memory`, `gcp`, `k8s` | `memory` | User secret backend |
 | `GCP_PROJECT_ID` | string | — | Required when `SECRET_BACKEND=gcp` |
-| `K8S_NAMESPACE` | string | `default` | Namespace for secrets when `SECRET_BACKEND=k8s` |
+| `K8S_NAMESPACE` | string | `sandcastle` | Namespace for secrets when `SECRET_BACKEND=k8s` |
