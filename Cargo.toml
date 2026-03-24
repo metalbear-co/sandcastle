@@ -44,17 +44,14 @@ bollard = "0.18"
 daytona-client = "0.5.0"
 futures-util = "0.3"
 glob = "0.3"
-jsonwebtoken = "9"
-octocrab = "0.44"
 regex = "1"
 reqwest = { version = "0.12", features = ["json"] }
 rmcp = { version = "1.2.0", features = ["server", "macros", "transport-streamable-http-server"] }
-secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "derive"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "1"

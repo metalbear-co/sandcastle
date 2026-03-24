@@ -1,4 +1,3 @@
-pub mod github_auth;
 pub mod handlers;
 pub mod middleware;
 pub mod provider;

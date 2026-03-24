@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
                 })
             }
             _ => {
-                let password = sandcastle_auth::github_auth::load_sandcastle_password();
+                let password = std::env::var("SANDCASTLE_PASSWORD").ok();
                 if password.is_some() {
                     info!("auth: password required to approve OAuth flow");
                 }
