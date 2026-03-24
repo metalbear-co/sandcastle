@@ -1,5 +1,5 @@
 [package]
-name = "sandcastle-secrets"
+name = "sandcastle-secrets-k8s"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -7,8 +7,9 @@ license = "MIT"
 [dependencies]
 sandcastle-secrets-core = { workspace = true }
 sandcastle-store-core = { workspace = true }
-sandcastle-secrets-memory = { workspace = true }
-sandcastle-secrets-gcp = { workspace = true }
-sandcastle-secrets-k8s = { workspace = true }
+sandcastle-util = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+k8s-openapi = { version = "0.24", features = ["v1_31"] }
+kube = { version = "0.99", features = ["client"] }
 tracing = { workspace = true }
