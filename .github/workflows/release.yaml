@@ -109,6 +109,6 @@ jobs:
 
       - name: Create GitHub release
         if: github.ref_type == 'tag'
-        uses: metalbear-co/action-gh-release@v2
+        uses: metalbear-co/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe
         with:
           generate_release_notes: true
