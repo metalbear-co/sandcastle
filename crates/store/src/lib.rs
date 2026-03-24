@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
-pub use types::{PendingAuthRecord, PendingCodeRecord, SandboxRecord};
+pub use types::{PendingAuthRecord, PendingCodeRecord, SandboxRecord, SandboxStatus};
 
 pub type SharedStateStore = Arc<dyn StateStore>;
 
@@ -42,6 +42,7 @@ pub trait StateStore: Send + Sync {
     async fn register_sandbox(&self, meta: &SandboxRecord) -> anyhow::Result<()>;
     async fn get_sandbox(&self, id: &str) -> anyhow::Result<Option<SandboxRecord>>;
     async fn remove_sandbox(&self, id: &str) -> anyhow::Result<()>;
+    async fn set_sandbox_status(&self, id: &str, status: SandboxStatus) -> anyhow::Result<()>;
     async fn set_active_sandbox(&self, owner_key: &str, sandbox_id: &str) -> anyhow::Result<()>;
     async fn get_active_sandbox(&self, owner_key: &str) -> anyhow::Result<Option<String>>;
     async fn list_sandboxes(&self, owner_key: &str) -> anyhow::Result<Vec<SandboxRecord>>;

@@ -18,7 +18,7 @@ use serde::Deserialize;
 use sandcastle_auth::RequestIdentity;
 use sandcastle_sandbox_providers::{Provider, SandboxHandle};
 use sandcastle_store::{
-    SharedStateStore,
+    SandboxStatus, SharedStateStore,
     types::{SandboxRecord, now_secs},
 };
 
@@ -193,13 +193,24 @@ impl SandcastleHandler {
     async fn resume_known_sandbox(&self, sandbox_id: &str) -> Result<SandboxHandle, String> {
         for p in &self.providers {
             if let Ok(handle) = p.resume(sandbox_id).await {
+                if let Err(e) = self
+                    .store
+                    .set_sandbox_status(sandbox_id, SandboxStatus::Running)
+                    .await
+                {
+                    tracing::warn!("failed to set sandbox {sandbox_id} status to running: {e}");
+                }
                 return Ok(handle);
             }
         }
-        if let Err(e) = self.store.remove_sandbox(sandbox_id).await {
-            tracing::warn!("failed to remove stale sandbox {sandbox_id}: {e}");
+        if let Err(e) = self
+            .store
+            .set_sandbox_status(sandbox_id, SandboxStatus::Suspended)
+            .await
+        {
+            tracing::warn!("failed to set sandbox {sandbox_id} status to suspended: {e}");
         }
-        Err(format!("Sandbox {sandbox_id} not found or has expired"))
+        Err(format!("Sandbox {sandbox_id} is suspended or not found"))
     }
 
     async fn resolve_sandbox(
@@ -280,6 +291,7 @@ impl SandcastleHandler {
                         work_dir: path.clone(),
                         owner_key: identity.owner_key.clone(),
                         created_at: now_secs(),
+                        status: SandboxStatus::Running,
                     };
                     if let Err(e) = self.store.register_sandbox(&record).await {
                         tracing::warn!("failed to register sandbox {id}: {e}");
@@ -328,7 +340,7 @@ impl SandcastleHandler {
                     "name": s.name,
                     "provider": s.provider,
                     "work_dir": s.work_dir,
-                    "status": "running"
+                    "status": s.status.to_string(),
                 })
             })
             .collect();

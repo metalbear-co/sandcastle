@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum SandboxStatus {
+    Running,
+    Suspended,
+}
+
+impl std::fmt::Display for SandboxStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SandboxStatus::Running => write!(f, "running"),
+            SandboxStatus::Suspended => write!(f, "suspended"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PendingCodeRecord {
     /// Unix timestamp (seconds) after which this code is expired.
@@ -27,6 +42,7 @@ pub struct SandboxRecord {
     pub owner_key: String,
     /// Unix timestamp (seconds) when the sandbox was created.
     pub created_at: i64,
+    pub status: SandboxStatus,
 }
 
 pub fn now_secs() -> i64 {
