@@ -1,0 +1,11 @@
+[package]
+name = "sandcastle-auth-provider-github"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+sandcastle-auth = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }

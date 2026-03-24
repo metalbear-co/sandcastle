@@ -21,10 +21,10 @@ use sandcastle_auth::handlers::{
 };
 use sandcastle_auth::middleware::require_auth;
 use sandcastle_auth::provider::SharedAuthProvider;
-use sandcastle_auth::providers::{
-    github::GitHubAuthProvider, google::GoogleAuthProvider, local::LocalAuthProvider,
-};
-use sandcastle_auth::{AuthState, SharedAuthState, load_persisted_tokens};
+use sandcastle_auth::providers::local::LocalAuthProvider;
+use sandcastle_auth::{AuthState, SharedAuthState};
+use sandcastle_auth_provider_github::GitHubAuthProvider;
+use sandcastle_auth_provider_google::GoogleAuthProvider;
 use sandcastle_sandbox_provider_daytona::{DaytonaProvider, load_daytona_creds};
 use sandcastle_sandbox_provider_docker::DockerProvider;
 use sandcastle_sandbox_provider_local::LocalProvider;
@@ -56,9 +56,10 @@ async fn main() -> Result<()> {
 
     let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
 
-    let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
-
-    let stored_config = sandcastle_keychain::load_config();
+    let auth_configured = std::env::var("AUTH_PROVIDER").is_ok()
+        || std::env::var("MCP_TOKEN").is_ok()
+        || std::env::var("SANDCASTLE_PASSWORD").is_ok();
+    let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok() || !auth_configured;
 
     // ── Storage backend ───────────────────────────────────────────────────────
 
@@ -77,8 +78,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             info!("storage: using in-memory backend");
-            let initial_tokens = load_persisted_tokens(&stored_config);
-            MemoryStore::new(initial_tokens)
+            MemoryStore::new(std::collections::HashMap::new())
         }
     };
 
@@ -137,9 +137,7 @@ async fn main() -> Result<()> {
                 })
             }
             _ => {
-                // "local" or any unrecognised value
-                let password =
-                    sandcastle_auth::github_auth::load_sandcastle_password(&stored_config)?;
+                let password = sandcastle_auth::github_auth::load_sandcastle_password();
                 if password.is_some() {
                     info!("auth: password required to approve OAuth flow");
                 }
@@ -148,18 +146,23 @@ async fn main() -> Result<()> {
         }
     };
 
-    let persist_to_keychain = std::env::var("STORAGE_BACKEND").unwrap_or_default() != "postgres";
-
     let auth_state: SharedAuthState = Arc::new(AuthState {
         store: store.clone(),
         base_url: base_url.clone(),
         no_auth,
         provider: auth_provider,
-        persist_to_keychain,
     });
 
     if no_auth {
-        info!("auth: disabled (SANDCASTLE_NO_AUTH is set)");
+        if !auth_configured {
+            tracing::warn!(
+                "running in dev mode: no authentication configured — \
+                 all requests are allowed without credentials. \
+                 Set AUTH_PROVIDER, MCP_TOKEN, or SANDCASTLE_PASSWORD for production use."
+            );
+        } else {
+            info!("auth: disabled (SANDCASTLE_NO_AUTH is set)");
+        }
     }
 
     if !no_auth {
@@ -208,7 +211,7 @@ async fn main() -> Result<()> {
     }
 
     if enabled.contains(&"daytona".to_string()) {
-        match load_daytona_creds(&stored_config) {
+        match load_daytona_creds() {
             Ok(creds) => {
                 match DaytonaProvider::new(
                     creds.api_key,

@@ -5,12 +5,12 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-sandcastle-secrets = { path = "../secrets" }
-sandcastle-store = { path = "../store" }
-sandcastle-util = { path = "../util" }
-async-trait = "0.1"
-reqwest = { version = "0.12", features = ["json"] }
-base64 = "0.22"
-serde_json = "1"
-tracing = "0.1"
-anyhow = "1"
+sandcastle-secrets = { workspace = true }
+sandcastle-store = { workspace = true }
+sandcastle-util = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

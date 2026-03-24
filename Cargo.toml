@@ -3,8 +3,9 @@ members = [
     "crates/sandcastle",
     "crates/store",
     "crates/util",
-    "crates/keychain",
     "crates/auth",
+    "crates/auth_provider_github",
+    "crates/auth_provider_google",
     "crates/sandbox_providers",
     "crates/sandbox_provider_local",
     "crates/sandbox_provider_docker",
@@ -16,3 +17,45 @@ members = [
     "crates/secrets_gcp",
 ]
 resolver = "3"
+
+[workspace.dependencies]
+# Internal crates
+sandcastle-util = { path = "crates/util" }
+sandcastle-store = { path = "crates/store" }
+sandcastle-store-memory = { path = "crates/store_memory" }
+sandcastle-store-postgres = { path = "crates/store_postgres" }
+sandcastle-secrets = { path = "crates/secrets" }
+sandcastle-secrets-memory = { path = "crates/secrets_memory" }
+sandcastle-secrets-gcp = { path = "crates/secrets_gcp" }
+sandcastle-auth = { path = "crates/auth" }
+sandcastle-auth-provider-github = { path = "crates/auth_provider_github" }
+sandcastle-auth-provider-google = { path = "crates/auth_provider_google" }
+sandcastle-sandbox-providers = { path = "crates/sandbox_providers" }
+sandcastle-sandbox-provider-local = { path = "crates/sandbox_provider_local" }
+sandcastle-sandbox-provider-docker = { path = "crates/sandbox_provider_docker" }
+sandcastle-sandbox-provider-daytona = { path = "crates/sandbox_provider_daytona" }
+
+# External dependencies
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+bollard = "0.18"
+daytona-client = "0.5.0"
+futures-util = "0.3"
+glob = "0.3"
+jsonwebtoken = "9"
+octocrab = "0.44"
+regex = "1"
+reqwest = { version = "0.12", features = ["json"] }
+rmcp = { version = "1.2.0", features = ["server", "macros", "transport-streamable-http-server"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "derive"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = "1"
+walkdir = "2"
