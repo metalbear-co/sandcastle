@@ -31,7 +31,6 @@ pub async fn load(enabled: &[String]) -> Vec<Arc<dyn Provider>> {
     if enabled.contains(&"daytona".to_string()) {
         match DaytonaProvider::from_env() {
             Ok(daytona) => {
-                daytona.start_cleanup_task();
                 providers.push(daytona);
                 tracing::info!("daytona sandbox provider registered");
             }
