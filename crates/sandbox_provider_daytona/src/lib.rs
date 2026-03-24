@@ -282,7 +282,7 @@ impl DaytonaProvider {
         }))
     }
 
-    pub fn from_env(ttl: Duration) -> anyhow::Result<Arc<Self>> {
+    pub fn from_env() -> anyhow::Result<Arc<Self>> {
         let api_key = std::env::var("DAYTONA_API_KEY").map_err(|_| {
             anyhow::anyhow!("DAYTONA_API_KEY is required to use the Daytona provider")
         })?;
@@ -290,7 +290,7 @@ impl DaytonaProvider {
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
             .trim_end_matches('/')
             .to_string();
-        Self::new(api_key, base_url, ttl).map_err(|e| anyhow::anyhow!(e))
+        Self::new(api_key, base_url, Duration::from_secs(120 * 60)).map_err(|e| anyhow::anyhow!(e))
     }
 
     pub fn start_cleanup_task(self: &Arc<Self>) {

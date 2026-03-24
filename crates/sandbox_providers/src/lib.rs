@@ -1,6 +1,6 @@
 pub use sandcastle_sandbox_providers_core::*;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use sandcastle_sandbox_provider_daytona::DaytonaProvider;
 use sandcastle_sandbox_provider_docker::DockerProvider;
@@ -10,14 +10,14 @@ pub async fn load(enabled: &[String]) -> Vec<Arc<dyn Provider>> {
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
 
     if enabled.contains(&"local".to_string()) {
-        let local = LocalProvider::new(Duration::from_secs(120 * 60));
+        let local = LocalProvider::from_env();
         local.start_cleanup_task();
         providers.push(local);
         tracing::info!("local sandbox provider registered");
     }
 
     if enabled.contains(&"docker".to_string()) {
-        match DockerProvider::new(Duration::from_secs(120 * 60)) {
+        match DockerProvider::from_env() {
             Ok(docker) => {
                 docker.cleanup_stale_containers().await;
                 docker.start_cleanup_task();
@@ -29,7 +29,7 @@ pub async fn load(enabled: &[String]) -> Vec<Arc<dyn Provider>> {
     }
 
     if enabled.contains(&"daytona".to_string()) {
-        match DaytonaProvider::from_env(Duration::from_secs(120 * 60)) {
+        match DaytonaProvider::from_env() {
             Ok(daytona) => {
                 daytona.start_cleanup_task();
                 providers.push(daytona);

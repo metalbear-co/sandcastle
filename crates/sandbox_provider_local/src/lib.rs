@@ -365,12 +365,18 @@ pub struct LocalProvider {
     ttl: Duration,
 }
 
+const DEFAULT_TTL: Duration = Duration::from_secs(120 * 60);
+
 impl LocalProvider {
     pub fn new(ttl: Duration) -> Arc<Self> {
         Arc::new(Self {
             sandboxes: Arc::new(RwLock::new(HashMap::new())),
             ttl,
         })
+    }
+
+    pub fn from_env() -> Arc<Self> {
+        Self::new(DEFAULT_TTL)
     }
 
     pub fn start_cleanup_task(self: &Arc<Self>) {
