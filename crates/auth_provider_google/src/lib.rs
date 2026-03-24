@@ -7,6 +7,19 @@ pub struct GoogleAuthProvider {
     pub client_secret: String,
 }
 
+impl GoogleAuthProvider {
+    pub fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            client_id: std::env::var("GOOGLE_CLIENT_ID").map_err(|_| {
+                anyhow::anyhow!("GOOGLE_CLIENT_ID is required for AUTH_PROVIDER=google")
+            })?,
+            client_secret: std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| {
+                anyhow::anyhow!("GOOGLE_CLIENT_SECRET is required for AUTH_PROVIDER=google")
+            })?,
+        })
+    }
+}
+
 fn decode_jwt_payload(token: &str) -> Result<serde_json::Value, String> {
     let payload_b64 = token
         .split('.')

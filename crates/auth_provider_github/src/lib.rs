@@ -6,6 +6,19 @@ pub struct GitHubAuthProvider {
     pub client_secret: String,
 }
 
+impl GitHubAuthProvider {
+    pub fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            client_id: std::env::var("GITHUB_OAUTH_CLIENT_ID").map_err(|_| {
+                anyhow::anyhow!("GITHUB_OAUTH_CLIENT_ID is required for AUTH_PROVIDER=github")
+            })?,
+            client_secret: std::env::var("GITHUB_OAUTH_CLIENT_SECRET").map_err(|_| {
+                anyhow::anyhow!("GITHUB_OAUTH_CLIENT_SECRET is required for AUTH_PROVIDER=github")
+            })?,
+        })
+    }
+}
+
 #[async_trait]
 impl AuthProvider for GitHubAuthProvider {
     fn name(&self) -> &'static str {

@@ -24,30 +24,12 @@ pub fn load(no_auth: bool) -> Result<SharedAuthProvider> {
         .as_str()
     {
         "github" => {
-            let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID").map_err(|_| {
-                anyhow::anyhow!("GITHUB_OAUTH_CLIENT_ID is required for AUTH_PROVIDER=github")
-            })?;
-            let client_secret = std::env::var("GITHUB_OAUTH_CLIENT_SECRET").map_err(|_| {
-                anyhow::anyhow!("GITHUB_OAUTH_CLIENT_SECRET is required for AUTH_PROVIDER=github")
-            })?;
             info!("auth: using GitHub OAuth provider");
-            Ok(Arc::new(GitHubAuthProvider {
-                client_id,
-                client_secret,
-            }))
+            Ok(Arc::new(GitHubAuthProvider::from_env()?))
         }
         "google" => {
-            let client_id = std::env::var("GOOGLE_CLIENT_ID").map_err(|_| {
-                anyhow::anyhow!("GOOGLE_CLIENT_ID is required for AUTH_PROVIDER=google")
-            })?;
-            let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| {
-                anyhow::anyhow!("GOOGLE_CLIENT_SECRET is required for AUTH_PROVIDER=google")
-            })?;
             info!("auth: using Google OAuth provider");
-            Ok(Arc::new(GoogleAuthProvider {
-                client_id,
-                client_secret,
-            }))
+            Ok(Arc::new(GoogleAuthProvider::from_env()?))
         }
         _ => {
             let password = std::env::var("SANDCASTLE_PASSWORD").ok();

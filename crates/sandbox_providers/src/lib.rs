@@ -2,7 +2,7 @@ pub use sandcastle_sandbox_providers_core::*;
 
 use std::{sync::Arc, time::Duration};
 
-use sandcastle_sandbox_provider_daytona::{DaytonaProvider, load_daytona_creds};
+use sandcastle_sandbox_provider_daytona::DaytonaProvider;
 use sandcastle_sandbox_provider_docker::DockerProvider;
 use sandcastle_sandbox_provider_local::LocalProvider;
 
@@ -29,22 +29,13 @@ pub async fn load(enabled: &[String]) -> Vec<Arc<dyn Provider>> {
     }
 
     if enabled.contains(&"daytona".to_string()) {
-        match load_daytona_creds() {
-            Ok(creds) => {
-                match DaytonaProvider::new(
-                    creds.api_key,
-                    creds.base_url,
-                    Duration::from_secs(120 * 60),
-                ) {
-                    Ok(daytona) => {
-                        daytona.start_cleanup_task();
-                        providers.push(daytona);
-                        tracing::info!("daytona sandbox provider registered");
-                    }
-                    Err(e) => tracing::warn!("daytona provider unavailable: {e}"),
-                }
+        match DaytonaProvider::from_env(Duration::from_secs(120 * 60)) {
+            Ok(daytona) => {
+                daytona.start_cleanup_task();
+                providers.push(daytona);
+                tracing::info!("daytona sandbox provider registered");
             }
-            Err(e) => tracing::warn!("daytona credentials unavailable: {e}"),
+            Err(e) => tracing::warn!("daytona provider unavailable: {e}"),
         }
     }
 

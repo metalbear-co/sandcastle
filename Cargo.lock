@@ -1918,6 +1918,7 @@ dependencies = [
 name = "sandcastle-auth-provider-github"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "reqwest",
  "sandcastle-auth-core",
@@ -1928,6 +1929,7 @@ dependencies = [
 name = "sandcastle-auth-provider-google"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64",
  "reqwest",
