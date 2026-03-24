@@ -69,7 +69,7 @@ All providers expose the same interface, so the rest of the server is backend-ag
 
 Users can store sensitive values (API keys, tokens, etc.) without passing them through the AI client. The server issues a one-time URL; the user submits the secret value directly in their browser or via `curl`. Stored secrets can then be injected as environment variables when running a command, and are never returned in tool responses.
 
-Two backends are available: **in-memory** (local development) and **Google Secret Manager** (cloud deployments). Selected via `SECRET_BACKEND=memory|gcp`.
+Three backends are available: **in-memory** (local development), **Google Secret Manager** (GCP cloud deployments), and **Kubernetes Secrets** (k8s deployments). Selected via `SECRET_BACKEND=memory|gcp|k8s`.
 
 ### State Store
 

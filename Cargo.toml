@@ -19,6 +19,7 @@ members = [
     "crates/secrets",
     "crates/secrets_memory",
     "crates/secrets_gcp",
+    "crates/secrets_k8s",
 ]
 resolver = "3"
 
@@ -33,6 +34,7 @@ sandcastle-secrets-core = { path = "crates/secrets_core" }
 sandcastle-secrets = { path = "crates/secrets" }
 sandcastle-secrets-memory = { path = "crates/secrets_memory" }
 sandcastle-secrets-gcp = { path = "crates/secrets_gcp" }
+sandcastle-secrets-k8s = { path = "crates/secrets_k8s" }
 sandcastle-auth-core = { path = "crates/auth_core" }
 sandcastle-auth = { path = "crates/auth" }
 sandcastle-auth-provider-github = { path = "crates/auth_provider_github" }
