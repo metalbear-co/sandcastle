@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use sandcastle_secrets::SecretBackend;
-use sandcastle_store::{SharedStateStore, types::now_secs};
+use sandcastle_secrets_core::SecretBackend;
+use sandcastle_store_core::{SharedStateStore, types::now_secs};
 use sandcastle_util::generate_token;
 
 /// GCP Secret Manager backend. Pending upload tokens are persisted in the shared

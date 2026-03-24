@@ -5,18 +5,15 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-sandcastle-util = { path = "../util" }
-sandcastle-keychain = { path = "../keychain" }
-sandcastle-store = { path = "../store" }
-axum = "0.8"
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-tracing = "0.1"
-octocrab = "0.44"
-jsonwebtoken = "9"
-secrecy = "0.10"
-async-trait = "0.1"
-base64 = "0.22"
-reqwest = { version = "0.12", features = ["json"] }
+sandcastle-util = { workspace = true }
+sandcastle-auth-core = { workspace = true }
+sandcastle-auth-provider-github = { workspace = true }
+sandcastle-auth-provider-google = { workspace = true }
+sandcastle-store = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

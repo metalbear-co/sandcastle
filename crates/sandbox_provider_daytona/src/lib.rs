@@ -1,10 +1,6 @@
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
+use anyhow::Result;
 use daytona_client::{
     DaytonaClient, DaytonaConfig,
     models::{CreateSandboxParams, ExecuteRequest, SandboxState},
@@ -12,10 +8,11 @@ use daytona_client::{
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
-use sandcastle_sandbox_providers::{Provider, SandboxHandle, SandboxMessage};
+use sandcastle_sandbox_providers_core::{Provider, SandboxHandle, SandboxMessage};
 use sandcastle_util::generate_token;
 
 const WORK_DIR: &str = "/home/user";
+const DEFAULT_BASE_URL: &str = "https://app.daytona.io/api";
 
 // ── Daytona Sandbox ───────────────────────────────────────────────────────────
 
@@ -261,51 +258,32 @@ fn shell_escape(s: &str) -> String {
 
 struct DaytonaRecord {
     handle: SandboxHandle,
-    sandbox_id: Uuid,
-    created_at: Instant,
 }
 
 pub struct DaytonaProvider {
     client: Arc<DaytonaClient>,
-    ttl: Duration,
     sandboxes: Arc<RwLock<HashMap<String, DaytonaRecord>>>,
 }
 
 impl DaytonaProvider {
-    pub fn new(api_key: String, base_url: String, ttl: Duration) -> Result<Arc<Self>, String> {
+    pub fn new(api_key: String, base_url: String) -> Result<Arc<Self>, String> {
         let config = DaytonaConfig::new(api_key).with_base_url(base_url);
         let client = DaytonaClient::new(config).map_err(|e| e.to_string())?;
         Ok(Arc::new(Self {
             client: Arc::new(client),
-            ttl,
             sandboxes: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
 
-    pub fn start_cleanup_task(self: &Arc<Self>) {
-        let provider = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                let expired: Vec<(String, Uuid)> = {
-                    let map = provider.sandboxes.read().await;
-                    map.iter()
-                        .filter(|(_, r)| r.created_at.elapsed() >= provider.ttl)
-                        .map(|(id, r)| (id.clone(), r.sandbox_id))
-                        .collect()
-                };
-                for (id, sandbox_id) in expired {
-                    let _ = provider
-                        .client
-                        .sandboxes()
-                        .delete_with_force(&sandbox_id, true)
-                        .await;
-                    provider.sandboxes.write().await.remove(&id);
-                    tracing::info!("daytona sandbox {id} expired and removed");
-                }
-            }
-        });
+    pub fn from_env() -> anyhow::Result<Arc<Self>> {
+        let api_key = std::env::var("DAYTONA_API_KEY").map_err(|_| {
+            anyhow::anyhow!("DAYTONA_API_KEY is required to use the Daytona provider")
+        })?;
+        let base_url = std::env::var("DAYTONA_BASE_URL")
+            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+            .trim_end_matches('/')
+            .to_string();
+        Self::new(api_key, base_url).map_err(|e| anyhow::anyhow!(e))
     }
 }
 
@@ -351,8 +329,6 @@ impl Provider for DaytonaProvider {
             id,
             DaytonaRecord {
                 handle: handle.clone(),
-                sandbox_id: sandbox.id,
-                created_at: Instant::now(),
             },
         );
 
@@ -360,87 +336,11 @@ impl Provider for DaytonaProvider {
     }
 
     async fn resume(&self, id: &str) -> Result<SandboxHandle, String> {
-        let map = self.sandboxes.read().await;
-        match map.get(id) {
-            None => Err(format!("Sandbox {id} not found")),
-            Some(r) if r.created_at.elapsed() >= self.ttl => {
-                Err(format!("Sandbox {id} has expired"))
-            }
-            Some(r) => Ok(r.handle.clone()),
-        }
+        self.sandboxes
+            .read()
+            .await
+            .get(id)
+            .map(|r| r.handle.clone())
+            .ok_or_else(|| format!("Sandbox {id} not found"))
     }
-}
-
-// ── Daytona credentials ───────────────────────────────────────────────────────
-
-use anyhow::Result;
-use sandcastle_keychain::{StoredConfig, load_config, save_config};
-use sandcastle_util::prompt;
-
-const DEFAULT_BASE_URL: &str = "https://app.daytona.io/api";
-
-pub struct DaytonaCreds {
-    pub api_key: String,
-    pub base_url: String,
-}
-
-pub fn load_daytona_creds(config: &StoredConfig) -> Result<DaytonaCreds> {
-    // Env var override
-    if let Ok(api_key) = std::env::var("DAYTONA_API_KEY") {
-        let base_url = std::env::var("DAYTONA_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
-            .trim_end_matches('/')
-            .to_string();
-        return Ok(DaytonaCreds { api_key, base_url });
-    }
-
-    // Try keychain
-    if let Some(api_key) = config.daytona_api_key.clone() {
-        let base_url = config
-            .daytona_base_url
-            .clone()
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
-            .trim_end_matches('/')
-            .to_string();
-        return Ok(DaytonaCreds { api_key, base_url });
-    }
-
-    // Run wizard
-    run_wizard()
-}
-
-fn run_wizard() -> Result<DaytonaCreds> {
-    eprintln!("\nSandcastle needs Daytona credentials to use the Daytona cloud sandbox provider.");
-    eprintln!("You can find your API key at https://app.daytona.io/dashboard/keys\n");
-
-    let api_key = loop {
-        let k = prompt("  Enter your Daytona API key: ")?;
-        if !k.is_empty() {
-            break k;
-        }
-        eprintln!("  API key cannot be empty.");
-    };
-
-    let base_url_input = prompt(&format!(
-        "  Enter Daytona base URL [default: {DEFAULT_BASE_URL}]: "
-    ))?;
-    let base_url = if base_url_input.is_empty() {
-        DEFAULT_BASE_URL.to_string()
-    } else {
-        base_url_input
-    };
-
-    // Persist to keychain (best-effort)
-    let mut config = load_config();
-    config.daytona_api_key = Some(api_key.clone());
-    config.daytona_base_url = Some(base_url.clone());
-    if let Err(e) = save_config(&config) {
-        eprintln!(
-            "Warning: could not save to keychain ({e}). You will be prompted again next run."
-        );
-    } else {
-        eprintln!("\nDaytona credentials saved to keychain.");
-    }
-
-    Ok(DaytonaCreds { api_key, base_url })
 }

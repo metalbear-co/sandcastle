@@ -5,6 +5,8 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-async-trait = "0.1"
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
+sandcastle-store-core = { workspace = true }
+sandcastle-store-memory = { workspace = true }
+sandcastle-store-postgres = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

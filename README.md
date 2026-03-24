@@ -64,18 +64,7 @@ SANDCASTLE_NO_AUTH=1 SANDCASTLE_PROVIDERS=local sandcastle
 
 ## Configuration
 
-| Variable | Values | Default | Purpose |
-|----------|--------|---------|---------|
-| `PORT` | number | `3000` | HTTP listen port |
-| `BASE_URL` | URL | `http://localhost:PORT` | Public base URL for OAuth redirects |
-| `SANDCASTLE_PROVIDERS` | `local`, `docker`, `daytona` (comma-separated) | prompts interactively | Sandbox providers to enable |
-| `SANDCASTLE_NO_AUTH` | any value | unset | Disable auth (local dev) |
-| `AUTH_PROVIDER` | `local`, `github`, `google` | `local` | OAuth identity provider |
-| `MCP_TOKEN` | string | — | Pre-shared bearer token |
-| `STORAGE_BACKEND` | `memory`, `postgres` | `memory` | State store backend |
-| `DATABASE_URL` | postgres connection string | — | Required when `STORAGE_BACKEND=postgres` |
-| `SECRET_BACKEND` | `memory`, `gcp` | `memory` | Secret store backend |
-| `GCP_PROJECT_ID` | string | — | Required when `SECRET_BACKEND=gcp` |
+See [CONFIGURATION.md](CONFIGURATION.md) for all environment variables.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full description of components and deployment modes.
 

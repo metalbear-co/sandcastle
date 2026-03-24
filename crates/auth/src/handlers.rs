@@ -360,7 +360,6 @@ pub async fn token_endpoint(
                     })),
                 );
             }
-            auth.on_tokens_changed().await;
             debug!(
                 "token: issued {token:.8}... for owner {:.16}...",
                 c.owner_key

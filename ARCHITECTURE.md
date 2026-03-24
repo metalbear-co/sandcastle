@@ -77,15 +77,4 @@ Shared persistent state: auth tokens, sandbox registry, and short-lived OAuth fl
 
 ## Environment Variables
 
-| Variable | Values | Default | Purpose |
-|----------|--------|---------|---------|
-| `STORAGE_BACKEND` | `memory`, `postgres` | `memory` | State store backend |
-| `SECRET_BACKEND` | `memory`, `gcp` | `memory` | User secret backend |
-| `DATABASE_URL` | postgres connection string | — | Required for `postgres` backend |
-| `GCP_PROJECT_ID` | string | — | Required for `gcp` secret backend |
-| `SANDCASTLE_PROVIDERS` | comma-separated list | prompts interactively | Non-interactive provider selection |
-| `AUTH_PROVIDER` | `local`, `github`, `google` | `local` | OAuth identity provider |
-| `SANDCASTLE_NO_AUTH` | any value | unset | Disable auth entirely (local dev) |
-| `MCP_TOKEN` | string | — | Pre-shared bearer token |
-| `BASE_URL` | URL | `http://localhost:PORT` | Public base URL for OAuth redirects |
-| `PORT` | number | `3000` | HTTP listen port |
+See [CONFIGURATION.md](CONFIGURATION.md) for all environment variables.

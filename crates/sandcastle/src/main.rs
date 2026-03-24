@@ -2,7 +2,7 @@ mod config;
 mod handler;
 mod secret_routes;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
@@ -20,21 +20,7 @@ use sandcastle_auth::handlers::{
     oauth_protected_resource, register_client, token_endpoint,
 };
 use sandcastle_auth::middleware::require_auth;
-use sandcastle_auth::provider::SharedAuthProvider;
-use sandcastle_auth::providers::{
-    github::GitHubAuthProvider, google::GoogleAuthProvider, local::LocalAuthProvider,
-};
-use sandcastle_auth::{AuthState, SharedAuthState, load_persisted_tokens};
-use sandcastle_sandbox_provider_daytona::{DaytonaProvider, load_daytona_creds};
-use sandcastle_sandbox_provider_docker::DockerProvider;
-use sandcastle_sandbox_provider_local::LocalProvider;
-use sandcastle_sandbox_providers::Provider;
-use sandcastle_secrets::SharedSecretBackend;
-use sandcastle_secrets_gcp::GcpSecretManagerBackend;
-use sandcastle_secrets_memory::MemorySecretBackend;
-use sandcastle_store::SharedStateStore;
-use sandcastle_store_memory::MemoryStore;
-use sandcastle_store_postgres::{PostgresStore, start_cleanup_task};
+use sandcastle_auth::{AuthState, SharedAuthState};
 
 use handler::SandcastleHandler;
 use secret_routes::BaseUrl;
@@ -56,110 +42,32 @@ async fn main() -> Result<()> {
 
     let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
 
-    let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok();
+    let auth_configured = std::env::var("AUTH_PROVIDER").is_ok()
+        || std::env::var("MCP_TOKEN").is_ok()
+        || std::env::var("SANDCASTLE_PASSWORD").is_ok();
+    let no_auth = std::env::var("SANDCASTLE_NO_AUTH").is_ok() || !auth_configured;
 
-    let stored_config = sandcastle_keychain::load_config();
-
-    // ── Storage backend ───────────────────────────────────────────────────────
-
-    let store: SharedStateStore = match std::env::var("STORAGE_BACKEND")
-        .unwrap_or_default()
-        .as_str()
-    {
-        "postgres" => {
-            let url = std::env::var("DATABASE_URL").map_err(|_| {
-                anyhow::anyhow!("DATABASE_URL is required for STORAGE_BACKEND=postgres")
-            })?;
-            info!("storage: using PostgreSQL backend");
-            let pg = PostgresStore::new(&url).await?;
-            start_cleanup_task(pg.pool.clone());
-            Arc::new(pg)
-        }
-        _ => {
-            info!("storage: using in-memory backend");
-            let initial_tokens = load_persisted_tokens(&stored_config);
-            MemoryStore::new(initial_tokens)
-        }
-    };
-
-    // ── Secret backend ────────────────────────────────────────────────────────
-
-    let secret_backend: SharedSecretBackend =
-        match std::env::var("SECRET_BACKEND").unwrap_or_default().as_str() {
-            "gcp" => {
-                let project_id = std::env::var("GCP_PROJECT_ID").map_err(|_| {
-                    anyhow::anyhow!("GCP_PROJECT_ID is required for SECRET_BACKEND=gcp")
-                })?;
-                info!("secrets: using GCP Secret Manager backend (project={project_id})");
-                Arc::new(GcpSecretManagerBackend::new(project_id, store.clone()))
-            }
-            _ => {
-                info!("secrets: using in-memory backend");
-                MemorySecretBackend::new()
-            }
-        };
-
-    // ── Auth provider ─────────────────────────────────────────────────────────
-
-    let auth_provider: SharedAuthProvider = if no_auth {
-        Arc::new(LocalAuthProvider { password: None })
-    } else {
-        match std::env::var("AUTH_PROVIDER")
-            .unwrap_or_else(|_| "local".to_string())
-            .as_str()
-        {
-            "github" => {
-                let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID").map_err(|_| {
-                    anyhow::anyhow!("GITHUB_OAUTH_CLIENT_ID is required for AUTH_PROVIDER=github")
-                })?;
-                let client_secret = std::env::var("GITHUB_OAUTH_CLIENT_SECRET").map_err(|_| {
-                    anyhow::anyhow!(
-                        "GITHUB_OAUTH_CLIENT_SECRET is required for AUTH_PROVIDER=github"
-                    )
-                })?;
-                info!("auth: using GitHub OAuth provider");
-                Arc::new(GitHubAuthProvider {
-                    client_id,
-                    client_secret,
-                })
-            }
-            "google" => {
-                let client_id = std::env::var("GOOGLE_CLIENT_ID").map_err(|_| {
-                    anyhow::anyhow!("GOOGLE_CLIENT_ID is required for AUTH_PROVIDER=google")
-                })?;
-                let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| {
-                    anyhow::anyhow!("GOOGLE_CLIENT_SECRET is required for AUTH_PROVIDER=google")
-                })?;
-                info!("auth: using Google OAuth provider");
-                Arc::new(GoogleAuthProvider {
-                    client_id,
-                    client_secret,
-                })
-            }
-            _ => {
-                // "local" or any unrecognised value
-                let password =
-                    sandcastle_auth::github_auth::load_sandcastle_password(&stored_config)?;
-                if password.is_some() {
-                    info!("auth: password required to approve OAuth flow");
-                }
-                Arc::new(LocalAuthProvider { password })
-            }
-        }
-    };
-
-    let persist_to_keychain = std::env::var("STORAGE_BACKEND").unwrap_or_default() != "postgres";
+    let store = sandcastle_store::load().await?;
+    let secret_backend = sandcastle_secrets::load(store.clone()).await?;
+    let auth_provider = sandcastle_auth::load(no_auth)?;
 
     let auth_state: SharedAuthState = Arc::new(AuthState {
         store: store.clone(),
         base_url: base_url.clone(),
         no_auth,
         provider: auth_provider,
-        persist_to_keychain,
     });
 
     if no_auth {
-        info!("auth: disabled (SANDCASTLE_NO_AUTH is set)");
+        if !auth_configured {
+            tracing::warn!(
+                "running in dev mode: no authentication configured — \
+                 all requests are allowed without credentials. \
+                 Set AUTH_PROVIDER, MCP_TOKEN, or SANDCASTLE_PASSWORD for production use."
+            );
+        } else {
+            info!("auth: disabled (SANDCASTLE_NO_AUTH is set)");
+        }
     }
 
     if !no_auth {
@@ -173,8 +81,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // ── Sandbox providers ─────────────────────────────────────────────────────
-
     let mut enabled = match std::env::var("SANDCASTLE_PROVIDERS") {
         Ok(val) => val
             .split(',')
@@ -186,46 +92,7 @@ async fn main() -> Result<()> {
         enabled.push("daytona".to_string());
     }
 
-    let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
-
-    if enabled.contains(&"local".to_string()) {
-        let local = LocalProvider::new(Duration::from_secs(120 * 60));
-        local.start_cleanup_task();
-        providers.push(local);
-        info!("local sandbox provider registered");
-    }
-
-    if enabled.contains(&"docker".to_string()) {
-        match DockerProvider::new(Duration::from_secs(120 * 60)) {
-            Ok(docker) => {
-                docker.cleanup_stale_containers().await;
-                docker.start_cleanup_task();
-                providers.push(docker);
-                info!("docker sandbox provider registered");
-            }
-            Err(e) => tracing::warn!("docker provider unavailable: {e}"),
-        }
-    }
-
-    if enabled.contains(&"daytona".to_string()) {
-        match load_daytona_creds(&stored_config) {
-            Ok(creds) => {
-                match DaytonaProvider::new(
-                    creds.api_key,
-                    creds.base_url,
-                    Duration::from_secs(120 * 60),
-                ) {
-                    Ok(daytona) => {
-                        daytona.start_cleanup_task();
-                        providers.push(daytona);
-                        info!("daytona sandbox provider registered");
-                    }
-                    Err(e) => tracing::warn!("daytona provider unavailable: {e}"),
-                }
-            }
-            Err(e) => tracing::warn!("daytona credentials unavailable: {e}"),
-        }
-    }
+    let providers = sandcastle_sandbox_providers::load(&enabled).await;
 
     // ── MCP service ───────────────────────────────────────────────────────────
 

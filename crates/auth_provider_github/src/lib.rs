@@ -1,10 +1,22 @@
 use async_trait::async_trait;
-
-use crate::provider::AuthProvider;
+use sandcastle_auth_core::AuthProvider;
 
 pub struct GitHubAuthProvider {
     pub client_id: String,
     pub client_secret: String,
+}
+
+impl GitHubAuthProvider {
+    pub fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            client_id: std::env::var("GITHUB_OAUTH_CLIENT_ID").map_err(|_| {
+                anyhow::anyhow!("GITHUB_OAUTH_CLIENT_ID is required for AUTH_PROVIDER=github")
+            })?,
+            client_secret: std::env::var("GITHUB_OAUTH_CLIENT_SECRET").map_err(|_| {
+                anyhow::anyhow!("GITHUB_OAUTH_CLIENT_SECRET is required for AUTH_PROVIDER=github")
+            })?,
+        })
+    }
 }
 
 #[async_trait]
@@ -27,7 +39,6 @@ impl AuthProvider for GitHubAuthProvider {
     async fn exchange_code(&self, code: &str, callback_url: &str) -> Result<String, String> {
         let client = reqwest::Client::new();
 
-        // Exchange code for access token
         let resp = client
             .post("https://github.com/login/oauth/access_token")
             .header("Accept", "application/json")
@@ -47,7 +58,6 @@ impl AuthProvider for GitHubAuthProvider {
             .ok_or_else(|| format!("no access_token in response: {body}"))?
             .to_string();
 
-        // Fetch authenticated user
         let user_resp = client
             .get("https://api.github.com/user")
             .header("Authorization", format!("Bearer {access_token}"))

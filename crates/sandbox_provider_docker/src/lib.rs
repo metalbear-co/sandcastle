@@ -21,7 +21,7 @@ use tokio::{
     sync::{RwLock, mpsc, oneshot},
 };
 
-use sandcastle_sandbox_providers::{Provider, SandboxHandle, SandboxMessage};
+use sandcastle_sandbox_providers_core::{Provider, SandboxHandle, SandboxMessage};
 use sandcastle_util::generate_token;
 
 const WORK_DIR: &str = "/workspace";
@@ -431,7 +431,13 @@ pub struct DockerProvider {
     ttl: Duration,
 }
 
+const DEFAULT_TTL: Duration = Duration::from_secs(120 * 60);
+
 impl DockerProvider {
+    pub fn from_env() -> Result<Arc<Self>, bollard::errors::Error> {
+        Self::new(DEFAULT_TTL)
+    }
+
     pub fn new(ttl: Duration) -> Result<Arc<Self>, bollard::errors::Error> {
         let docker = connect_docker()?;
         let image = std::env::var("SANDCASTLE_DOCKER_IMAGE")

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use sandcastle_store::{
-    StateStore,
+use sandcastle_store_core::{
+    SandboxStatus, StateStore,
     types::{PendingAuthRecord, PendingCodeRecord, SandboxRecord, now_secs},
 };
 use sqlx::postgres::PgPoolOptions;
@@ -54,16 +54,28 @@ struct SandboxRow {
     work_dir: String,
     name: String,
     created_at: i64,
-}
-
-#[derive(sqlx::FromRow)]
-struct ActiveRow {
-    sandbox_id: String,
+    status: String,
 }
 
 #[derive(sqlx::FromRow)]
 struct OwnerRow {
     owner_key: String,
+}
+
+fn sandbox_row_to_record(r: SandboxRow) -> SandboxRecord {
+    let status = match r.status.as_str() {
+        "suspended" => SandboxStatus::Suspended,
+        _ => SandboxStatus::Running,
+    };
+    SandboxRecord {
+        id: r.id,
+        owner_key: r.owner_key,
+        provider: r.provider,
+        work_dir: r.work_dir,
+        name: r.name,
+        created_at: r.created_at,
+        status,
+    }
 }
 
 // ── Impl ─────────────────────────────────────────────────────────────────────
@@ -193,8 +205,8 @@ impl StateStore for PostgresStore {
 
     async fn register_sandbox(&self, meta: &SandboxRecord) -> anyhow::Result<()> {
         sqlx::query(
-            "INSERT INTO sandboxes (id, owner_key, provider, work_dir, name, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            "INSERT INTO sandboxes (id, owner_key, provider, work_dir, name, created_at, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(&meta.id)
@@ -203,6 +215,7 @@ impl StateStore for PostgresStore {
         .bind(&meta.work_dir)
         .bind(&meta.name)
         .bind(meta.created_at)
+        .bind(meta.status.to_string())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -210,29 +223,26 @@ impl StateStore for PostgresStore {
 
     async fn get_sandbox(&self, id: &str) -> anyhow::Result<Option<SandboxRecord>> {
         let row = sqlx::query_as::<_, SandboxRow>(
-            "SELECT id, owner_key, provider, work_dir, name, created_at
+            "SELECT id, owner_key, provider, work_dir, name, created_at, status
              FROM sandboxes WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| SandboxRecord {
-            id: r.id,
-            owner_key: r.owner_key,
-            provider: r.provider,
-            work_dir: r.work_dir,
-            name: r.name,
-            created_at: r.created_at,
-        }))
+        Ok(row.map(sandbox_row_to_record))
     }
 
     async fn remove_sandbox(&self, id: &str) -> anyhow::Result<()> {
-        // active_sandboxes has no FK cascade, clean up manually
-        sqlx::query("DELETE FROM active_sandboxes WHERE sandbox_id = $1")
+        sqlx::query("DELETE FROM sandboxes WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await?;
-        sqlx::query("DELETE FROM sandboxes WHERE id = $1")
+        Ok(())
+    }
+
+    async fn set_sandbox_status(&self, id: &str, status: SandboxStatus) -> anyhow::Result<()> {
+        sqlx::query("UPDATE sandboxes SET status = $1 WHERE id = $2")
+            .bind(status.to_string())
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -253,6 +263,10 @@ impl StateStore for PostgresStore {
     }
 
     async fn get_active_sandbox(&self, owner_key: &str) -> anyhow::Result<Option<String>> {
+        #[derive(sqlx::FromRow)]
+        struct ActiveRow {
+            sandbox_id: String,
+        }
         let row = sqlx::query_as::<_, ActiveRow>(
             "SELECT sandbox_id FROM active_sandboxes WHERE owner_key = $1",
         )
@@ -264,23 +278,13 @@ impl StateStore for PostgresStore {
 
     async fn list_sandboxes(&self, owner_key: &str) -> anyhow::Result<Vec<SandboxRecord>> {
         let rows = sqlx::query_as::<_, SandboxRow>(
-            "SELECT id, owner_key, provider, work_dir, name, created_at
+            "SELECT id, owner_key, provider, work_dir, name, created_at, status
              FROM sandboxes WHERE owner_key = $1",
         )
         .bind(owner_key)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| SandboxRecord {
-                id: r.id,
-                owner_key: r.owner_key,
-                provider: r.provider,
-                work_dir: r.work_dir,
-                name: r.name,
-                created_at: r.created_at,
-            })
-            .collect())
+        Ok(rows.into_iter().map(sandbox_row_to_record).collect())
     }
 
     async fn sandbox_owned_by(&self, sandbox_id: &str, owner_key: &str) -> anyhow::Result<bool> {

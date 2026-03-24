@@ -1,4 +1,3 @@
-pub mod github_auth;
 pub mod handlers;
 pub mod middleware;
 pub mod provider;
@@ -6,19 +5,47 @@ pub mod providers;
 
 use std::sync::Arc;
 
-use sandcastle_keychain::{StoredConfig, load_config, save_config};
+use anyhow::Result;
+use sandcastle_auth_provider_github::GitHubAuthProvider;
+use sandcastle_auth_provider_google::GoogleAuthProvider;
 use sandcastle_store::SharedStateStore;
+use tracing::info;
 
 pub use provider::SharedAuthProvider;
 pub use sandcastle_store::{PendingAuthRecord, PendingCodeRecord};
+
+pub fn load(no_auth: bool) -> Result<SharedAuthProvider> {
+    use providers::local::LocalAuthProvider;
+    if no_auth {
+        return Ok(Arc::new(LocalAuthProvider { password: None }));
+    }
+    match std::env::var("AUTH_PROVIDER")
+        .unwrap_or_else(|_| "local".to_string())
+        .as_str()
+    {
+        "github" => {
+            info!("auth: using GitHub OAuth provider");
+            Ok(Arc::new(GitHubAuthProvider::from_env()?))
+        }
+        "google" => {
+            info!("auth: using Google OAuth provider");
+            Ok(Arc::new(GoogleAuthProvider::from_env()?))
+        }
+        _ => {
+            let password = std::env::var("SANDCASTLE_PASSWORD").ok();
+            if password.is_some() {
+                info!("auth: password required to approve OAuth flow");
+            }
+            Ok(Arc::new(LocalAuthProvider { password }))
+        }
+    }
+}
 
 pub struct AuthState {
     pub store: SharedStateStore,
     pub base_url: String,
     pub no_auth: bool,
     pub provider: SharedAuthProvider,
-    /// When true, token mutations are persisted to the OS keychain (memory-mode only).
-    pub persist_to_keychain: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -29,29 +56,3 @@ pub struct RequestIdentity {
 }
 
 pub type SharedAuthState = Arc<AuthState>;
-
-impl AuthState {
-    /// Called after a token is written. Persists to keychain when in memory mode.
-    pub async fn on_tokens_changed(&self) {
-        if !self.persist_to_keychain {
-            return;
-        }
-        if let Ok(tokens) = self.store.all_tokens().await {
-            persist_tokens(&tokens);
-        }
-    }
-}
-
-/// Load any tokens persisted from a previous run (used to seed MemoryStore).
-pub fn load_persisted_tokens(config: &StoredConfig) -> std::collections::HashMap<String, String> {
-    config.valid_tokens.clone().unwrap_or_default()
-}
-
-/// Persist the current token map to the keychain (best-effort).
-pub fn persist_tokens(tokens: &std::collections::HashMap<String, String>) {
-    let mut config = load_config();
-    config.valid_tokens = Some(tokens.clone());
-    if let Err(e) = save_config(&config) {
-        tracing::warn!("keychain: could not persist tokens: {e}");
-    }
-}

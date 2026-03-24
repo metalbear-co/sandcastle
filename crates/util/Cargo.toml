@@ -5,4 +5,4 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-anyhow = "1"
+anyhow = { workspace = true }

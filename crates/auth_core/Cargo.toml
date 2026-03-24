@@ -1,10 +1,8 @@
 [package]
-name = "sandcastle-store-memory"
+name = "sandcastle-auth-core"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
 [dependencies]
-sandcastle-store-core = { workspace = true }
-anyhow = { workspace = true }
 async-trait = { workspace = true }

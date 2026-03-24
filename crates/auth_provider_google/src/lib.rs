@@ -1,15 +1,25 @@
 use async_trait::async_trait;
 use base64::Engine;
-
-use crate::provider::AuthProvider;
+use sandcastle_auth_core::AuthProvider;
 
 pub struct GoogleAuthProvider {
     pub client_id: String,
     pub client_secret: String,
 }
 
-/// Decode the payload section of a JWT without verifying the signature.
-/// Safe here because the token is obtained directly from Google over HTTPS.
+impl GoogleAuthProvider {
+    pub fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            client_id: std::env::var("GOOGLE_CLIENT_ID").map_err(|_| {
+                anyhow::anyhow!("GOOGLE_CLIENT_ID is required for AUTH_PROVIDER=google")
+            })?,
+            client_secret: std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| {
+                anyhow::anyhow!("GOOGLE_CLIENT_SECRET is required for AUTH_PROVIDER=google")
+            })?,
+        })
+    }
+}
+
 fn decode_jwt_payload(token: &str) -> Result<serde_json::Value, String> {
     let payload_b64 = token
         .split('.')

@@ -5,5 +5,10 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-tokio = { version = "1", features = ["sync"] }
-async-trait = "0.1"
+sandcastle-sandbox-providers-core = { workspace = true }
+sandcastle-sandbox-provider-local = { workspace = true }
+sandcastle-sandbox-provider-docker = { workspace = true }
+sandcastle-sandbox-provider-daytona = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

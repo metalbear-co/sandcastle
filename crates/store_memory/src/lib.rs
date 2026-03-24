@@ -4,8 +4,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use sandcastle_store::{
-    StateStore,
+use sandcastle_store_core::{
+    SandboxStatus, StateStore,
     types::{PendingAuthRecord, PendingCodeRecord, SandboxRecord, now_secs},
 };
 
@@ -111,6 +111,13 @@ impl StateStore for MemoryStore {
             .write()
             .unwrap()
             .retain(|_, active_id| active_id != id);
+        Ok(())
+    }
+
+    async fn set_sandbox_status(&self, id: &str, status: SandboxStatus) -> anyhow::Result<()> {
+        if let Some(record) = self.sandboxes.write().unwrap().get_mut(id) {
+            record.status = status;
+        }
         Ok(())
     }
 
