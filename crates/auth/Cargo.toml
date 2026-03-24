@@ -6,6 +6,9 @@ license = "MIT"
 
 [dependencies]
 sandcastle-util = { workspace = true }
+sandcastle-auth-core = { workspace = true }
+sandcastle-auth-provider-github = { workspace = true }
+sandcastle-auth-provider-google = { workspace = true }
 sandcastle-store = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

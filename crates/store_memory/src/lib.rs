@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use sandcastle_store::{
+use sandcastle_store_core::{
     SandboxStatus, StateStore,
     types::{PendingAuthRecord, PendingCodeRecord, SandboxRecord, now_secs},
 };

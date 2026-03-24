@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use sandcastle_secrets::SecretBackend;
+use sandcastle_secrets_core::SecretBackend;
 use sandcastle_util::generate_token;
 
 #[derive(Default)]

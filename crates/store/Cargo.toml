@@ -5,6 +5,8 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+sandcastle-store-core = { workspace = true }
+sandcastle-store-memory = { workspace = true }
+sandcastle-store-postgres = { workspace = true }
 anyhow = { workspace = true }
-async-trait = { workspace = true }
-serde = { workspace = true }
+tracing = { workspace = true }

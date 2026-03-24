@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sandcastle_auth::provider::AuthProvider;
+use sandcastle_auth_core::AuthProvider;
 
 pub struct GitHubAuthProvider {
     pub client_id: String,

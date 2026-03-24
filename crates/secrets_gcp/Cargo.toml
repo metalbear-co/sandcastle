@@ -5,8 +5,8 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-sandcastle-secrets = { workspace = true }
-sandcastle-store = { workspace = true }
+sandcastle-secrets-core = { workspace = true }
+sandcastle-store-core = { workspace = true }
 sandcastle-util = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

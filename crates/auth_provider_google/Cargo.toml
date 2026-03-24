@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-sandcastle-auth = { workspace = true }
+sandcastle-auth-core = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true }

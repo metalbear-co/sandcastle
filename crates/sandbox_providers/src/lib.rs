@@ -1,172 +1,52 @@
-use std::{collections::HashMap, path::PathBuf};
+pub use sandcastle_sandbox_providers_core::*;
 
-use tokio::sync::{mpsc, oneshot};
+use std::{sync::Arc, time::Duration};
 
-pub enum SandboxMessage {
-    ReadFile {
-        path: String,
-        offset: Option<u32>,
-        limit: Option<u32>,
-        reply: oneshot::Sender<String>,
-    },
-    WriteFile {
-        path: String,
-        content: String,
-        reply: oneshot::Sender<String>,
-    },
-    EditFile {
-        path: String,
-        old_string: String,
-        new_string: String,
-        reply: oneshot::Sender<String>,
-    },
-    Glob {
-        pattern: String,
-        base_path: Option<String>,
-        reply: oneshot::Sender<String>,
-    },
-    Grep {
-        pattern: String,
-        path: Option<String>,
-        include: Option<String>,
-        reply: oneshot::Sender<String>,
-    },
-    RunCommand {
-        command: String,
-        dir: Option<String>,
-        env: HashMap<String, String>,
-        output_tx: mpsc::Sender<String>,
-        reply: oneshot::Sender<i32>,
-    },
-}
+use sandcastle_sandbox_provider_daytona::{DaytonaProvider, load_daytona_creds};
+use sandcastle_sandbox_provider_docker::DockerProvider;
+use sandcastle_sandbox_provider_local::LocalProvider;
 
-#[derive(Clone)]
-pub struct SandboxHandle {
-    pub id: String,
-    pub name: String,
-    pub work_dir: PathBuf,
-    tx: mpsc::Sender<SandboxMessage>,
-}
+pub async fn load(enabled: &[String]) -> Vec<Arc<dyn Provider>> {
+    let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
 
-impl SandboxHandle {
-    pub fn new(
-        id: String,
-        name: String,
-        work_dir: PathBuf,
-        tx: mpsc::Sender<SandboxMessage>,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            work_dir,
-            tx,
+    if enabled.contains(&"local".to_string()) {
+        let local = LocalProvider::new(Duration::from_secs(120 * 60));
+        local.start_cleanup_task();
+        providers.push(local);
+        tracing::info!("local sandbox provider registered");
+    }
+
+    if enabled.contains(&"docker".to_string()) {
+        match DockerProvider::new(Duration::from_secs(120 * 60)) {
+            Ok(docker) => {
+                docker.cleanup_stale_containers().await;
+                docker.start_cleanup_task();
+                providers.push(docker);
+                tracing::info!("docker sandbox provider registered");
+            }
+            Err(e) => tracing::warn!("docker provider unavailable: {e}"),
         }
     }
 
-    pub async fn read_file(&self, path: &str, offset: Option<u32>, limit: Option<u32>) -> String {
-        let (reply, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(SandboxMessage::ReadFile {
-                path: path.to_string(),
-                offset,
-                limit,
-                reply,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
+    if enabled.contains(&"daytona".to_string()) {
+        match load_daytona_creds() {
+            Ok(creds) => {
+                match DaytonaProvider::new(
+                    creds.api_key,
+                    creds.base_url,
+                    Duration::from_secs(120 * 60),
+                ) {
+                    Ok(daytona) => {
+                        daytona.start_cleanup_task();
+                        providers.push(daytona);
+                        tracing::info!("daytona sandbox provider registered");
+                    }
+                    Err(e) => tracing::warn!("daytona provider unavailable: {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("daytona credentials unavailable: {e}"),
+        }
     }
 
-    pub async fn write_file(&self, path: &str, content: &str) -> String {
-        let (reply, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(SandboxMessage::WriteFile {
-                path: path.to_string(),
-                content: content.to_string(),
-                reply,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
-    }
-
-    pub async fn edit_file(&self, path: &str, old_string: &str, new_string: &str) -> String {
-        let (reply, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(SandboxMessage::EditFile {
-                path: path.to_string(),
-                old_string: old_string.to_string(),
-                new_string: new_string.to_string(),
-                reply,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
-    }
-
-    pub async fn glob(&self, pattern: &str, base_path: Option<String>) -> String {
-        let (reply, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(SandboxMessage::Glob {
-                pattern: pattern.to_string(),
-                base_path,
-                reply,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
-    }
-
-    pub async fn grep(
-        &self,
-        pattern: &str,
-        path: Option<String>,
-        include: Option<String>,
-    ) -> String {
-        let (reply, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(SandboxMessage::Grep {
-                pattern: pattern.to_string(),
-                path,
-                include,
-                reply,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| "Error: sandbox actor dropped reply".to_string())
-    }
-
-    pub async fn run_command(
-        &self,
-        command: &str,
-        dir: Option<String>,
-        env: HashMap<String, String>,
-    ) -> (mpsc::Receiver<String>, oneshot::Receiver<i32>) {
-        let (output_tx, output_rx) = mpsc::channel(64);
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(SandboxMessage::RunCommand {
-                command: command.to_string(),
-                dir,
-                env,
-                output_tx,
-                reply: reply_tx,
-            })
-            .await;
-        (output_rx, reply_rx)
-    }
-}
-
-#[async_trait::async_trait]
-pub trait Provider: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    async fn create(&self, name: String) -> Result<SandboxHandle, String>;
-    async fn resume(&self, id: &str) -> Result<SandboxHandle, String>;
+    providers
 }

@@ -1876,18 +1876,9 @@ dependencies = [
  "http-body-util",
  "rmcp",
  "sandcastle-auth",
- "sandcastle-auth-provider-github",
- "sandcastle-auth-provider-google",
- "sandcastle-sandbox-provider-daytona",
- "sandcastle-sandbox-provider-docker",
- "sandcastle-sandbox-provider-local",
  "sandcastle-sandbox-providers",
  "sandcastle-secrets",
- "sandcastle-secrets-gcp",
- "sandcastle-secrets-memory",
  "sandcastle-store",
- "sandcastle-store-memory",
- "sandcastle-store-postgres",
  "sandcastle-util",
  "serde",
  "serde_json",
@@ -1905,6 +1896,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "sandcastle-auth-core",
+ "sandcastle-auth-provider-github",
+ "sandcastle-auth-provider-google",
  "sandcastle-store",
  "sandcastle-util",
  "serde",
@@ -1914,12 +1908,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandcastle-auth-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+]
+
+[[package]]
 name = "sandcastle-auth-provider-github"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "reqwest",
- "sandcastle-auth",
+ "sandcastle-auth-core",
  "serde_json",
 ]
 
@@ -1930,7 +1931,7 @@ dependencies = [
  "async-trait",
  "base64",
  "reqwest",
- "sandcastle-auth",
+ "sandcastle-auth-core",
  "serde_json",
 ]
 
@@ -1941,7 +1942,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "daytona-client",
- "sandcastle-sandbox-providers",
+ "sandcastle-sandbox-providers-core",
  "sandcastle-util",
  "serde_json",
  "tokio",
@@ -1956,7 +1957,7 @@ dependencies = [
  "async-trait",
  "bollard",
  "futures-util",
- "sandcastle-sandbox-providers",
+ "sandcastle-sandbox-providers-core",
  "sandcastle-util",
  "serde_json",
  "tokio",
@@ -1970,7 +1971,7 @@ dependencies = [
  "async-trait",
  "glob",
  "regex",
- "sandcastle-sandbox-providers",
+ "sandcastle-sandbox-providers-core",
  "sandcastle-util",
  "serde_json",
  "tokio",
@@ -1982,12 +1983,37 @@ dependencies = [
 name = "sandcastle-sandbox-providers"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "sandcastle-sandbox-provider-daytona",
+ "sandcastle-sandbox-provider-docker",
+ "sandcastle-sandbox-provider-local",
+ "sandcastle-sandbox-providers-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sandcastle-sandbox-providers-core"
+version = "0.1.0"
+dependencies = [
  "async-trait",
  "tokio",
 ]
 
 [[package]]
 name = "sandcastle-secrets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "sandcastle-secrets-core",
+ "sandcastle-secrets-gcp",
+ "sandcastle-secrets-memory",
+ "sandcastle-store-core",
+ "tracing",
+]
+
+[[package]]
+name = "sandcastle-secrets-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2001,8 +2027,8 @@ dependencies = [
  "async-trait",
  "base64",
  "reqwest",
- "sandcastle-secrets",
- "sandcastle-store",
+ "sandcastle-secrets-core",
+ "sandcastle-store-core",
  "sandcastle-util",
  "serde_json",
  "tracing",
@@ -2013,12 +2039,23 @@ name = "sandcastle-secrets-memory"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "sandcastle-secrets",
+ "sandcastle-secrets-core",
  "sandcastle-util",
 ]
 
 [[package]]
 name = "sandcastle-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "sandcastle-store-core",
+ "sandcastle-store-memory",
+ "sandcastle-store-postgres",
+ "tracing",
+]
+
+[[package]]
+name = "sandcastle-store-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2032,7 +2069,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "sandcastle-store",
+ "sandcastle-store-core",
 ]
 
 [[package]]
@@ -2041,7 +2078,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "sandcastle-store",
+ "sandcastle-store-core",
  "sqlx",
  "tokio",
  "tracing",

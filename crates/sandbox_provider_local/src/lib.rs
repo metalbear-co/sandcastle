@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use walkdir::WalkDir;
 
-use sandcastle_sandbox_providers::{Provider, SandboxHandle, SandboxMessage};
+use sandcastle_sandbox_providers_core::{Provider, SandboxHandle, SandboxMessage};
 use sandcastle_util::generate_token;
 
 // ── LocalSandbox ──────────────────────────────────────────────────────────────

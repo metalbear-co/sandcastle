@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-sandcastle-sandbox-providers = { workspace = true }
+sandcastle-sandbox-providers-core = { workspace = true }
 sandcastle-util = { workspace = true }
 async-trait = { workspace = true }
 bollard = { workspace = true }

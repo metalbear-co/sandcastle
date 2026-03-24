@@ -1,17 +1,21 @@
 [workspace]
 members = [
     "crates/sandcastle",
+    "crates/store_core",
     "crates/store",
     "crates/util",
+    "crates/auth_core",
     "crates/auth",
     "crates/auth_provider_github",
     "crates/auth_provider_google",
+    "crates/sandbox_providers_core",
     "crates/sandbox_providers",
     "crates/sandbox_provider_local",
     "crates/sandbox_provider_docker",
     "crates/sandbox_provider_daytona",
     "crates/store_memory",
     "crates/store_postgres",
+    "crates/secrets_core",
     "crates/secrets",
     "crates/secrets_memory",
     "crates/secrets_gcp",
@@ -21,15 +25,19 @@ resolver = "3"
 [workspace.dependencies]
 # Internal crates
 sandcastle-util = { path = "crates/util" }
+sandcastle-store-core = { path = "crates/store_core" }
 sandcastle-store = { path = "crates/store" }
 sandcastle-store-memory = { path = "crates/store_memory" }
 sandcastle-store-postgres = { path = "crates/store_postgres" }
+sandcastle-secrets-core = { path = "crates/secrets_core" }
 sandcastle-secrets = { path = "crates/secrets" }
 sandcastle-secrets-memory = { path = "crates/secrets_memory" }
 sandcastle-secrets-gcp = { path = "crates/secrets_gcp" }
+sandcastle-auth-core = { path = "crates/auth_core" }
 sandcastle-auth = { path = "crates/auth" }
 sandcastle-auth-provider-github = { path = "crates/auth_provider_github" }
 sandcastle-auth-provider-google = { path = "crates/auth_provider_google" }
+sandcastle-sandbox-providers-core = { path = "crates/sandbox_providers_core" }
 sandcastle-sandbox-providers = { path = "crates/sandbox_providers" }
 sandcastle-sandbox-provider-local = { path = "crates/sandbox_provider_local" }
 sandcastle-sandbox-provider-docker = { path = "crates/sandbox_provider_docker" }

@@ -12,7 +12,7 @@ use daytona_client::{
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
-use sandcastle_sandbox_providers::{Provider, SandboxHandle, SandboxMessage};
+use sandcastle_sandbox_providers_core::{Provider, SandboxHandle, SandboxMessage};
 use sandcastle_util::generate_token;
 
 const WORK_DIR: &str = "/home/user";

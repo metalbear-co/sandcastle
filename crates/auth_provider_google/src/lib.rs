@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use base64::Engine;
-use sandcastle_auth::provider::AuthProvider;
+use sandcastle_auth_core::AuthProvider;
 
 pub struct GoogleAuthProvider {
     pub client_id: String,
