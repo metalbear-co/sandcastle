@@ -8,7 +8,7 @@ COPY . .
 
 RUN cargo build --release -p sandcastle
 
-FROM gcr.io/distroless/cc-debian12
+FROM gcr.io/distroless/cc-debian13
 
 COPY --from=builder /app/target/release/sandcastle /sandcastle
 
