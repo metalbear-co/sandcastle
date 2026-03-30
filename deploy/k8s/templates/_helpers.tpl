@@ -41,13 +41,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/*
 Build DATABASE_URL.
 If storage.databaseUrl is set, use it directly.
-If postgresql subchart is enabled, build the URL from subchart values.
+If postgresql.enabled, build the URL from the in-chart postgres service.
 */}}
 {{- define "sandcastle.databaseUrl" -}}
 {{- if .Values.storage.databaseUrl }}
 {{- .Values.storage.databaseUrl }}
 {{- else if .Values.postgresql.enabled }}
-{{- printf "postgresql://%s:%s@%s-postgresql/%s" .Values.postgresql.auth.username .Values.postgresql.auth.password .Release.Name .Values.postgresql.auth.database }}
+{{- printf "postgresql://%s:%s@%s-postgres/%s" .Values.postgresql.auth.username .Values.postgresql.auth.password (include "sandcastle.fullname" .) .Values.postgresql.auth.database }}
 {{- end }}
 {{- end }}
 

@@ -55,15 +55,18 @@ sandbox:
   daytona:
     apiKey: ""
 
-# Optional in-cluster PostgreSQL (Bitnami subchart).
+# Optional in-cluster PostgreSQL.
 # When enabled, STORAGE_BACKEND is set to postgres and DATABASE_URL is
-# auto-built from the subchart service name — no manual URL needed.
+# auto-built — no manual URL needed.
 postgresql:
   enabled: false
+  image:
+    tag: "17"
   auth:
     database: sandcastle
     username: sandcastle
     password: ""
+  storage: 10Gi
 
 ingress:
   enabled: false
