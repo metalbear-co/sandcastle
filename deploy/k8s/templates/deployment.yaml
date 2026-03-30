@@ -25,7 +25,7 @@ spec:
       labels:
         {{- include "sandcastle.selectorLabels" . | nindent 8 }}
     spec:
-      {{- if eq .Values.secretBackend.type "k8s" }}
+      {{- if or (eq .Values.secretBackend.type "k8s") .Values.sandbox.k8s.enabled }}
       serviceAccountName: {{ include "sandcastle.fullname" . }}
       {{- else }}
       automountServiceAccountToken: false
@@ -59,6 +59,10 @@ spec:
             {{- if eq .Values.secretBackend.type "k8s" }}
             - name: K8S_NAMESPACE
               value: {{ default .Release.Namespace .Values.secretBackend.k8sNamespace | quote }}
+            {{- end }}
+            {{- if .Values.sandbox.k8s.enabled }}
+            - name: K8S_SANDBOX_NAMESPACE
+              value: {{ .Values.sandbox.k8s.namespace | quote }}
             {{- end }}
             {{- if .Values.secretBackend.gcpProjectId }}
             - name: GCP_PROJECT_ID
