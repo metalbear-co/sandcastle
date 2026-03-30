@@ -1,5 +1,6 @@
 mod config;
 mod handler;
+mod rook_ws;
 mod secret_routes;
 
 use std::sync::Arc;
@@ -96,6 +97,8 @@ async fn main() -> Result<()> {
 
     let providers = sandcastle_sandbox_providers::load(&enabled).await;
 
+    let rook_registry = providers.iter().find_map(|p| p.rook_registry());
+
     // ── MCP service ───────────────────────────────────────────────────────────
 
     let service = StreamableHttpService::new(
@@ -139,6 +142,8 @@ async fn main() -> Result<()> {
             get(secret_routes::get_secret_page).post(secret_routes::post_secret_value),
         )
         .route("/health", get(|| async { StatusCode::OK }))
+        .route("/rook/ws", get(rook_ws::rook_ws_handler))
+        .layer(Extension(rook_registry))
         .layer(Extension(secret_backend))
         .layer(Extension(BaseUrl(base_url.clone())))
         .layer(Extension(auth_state))

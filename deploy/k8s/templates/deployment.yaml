@@ -63,6 +63,8 @@ spec:
             {{- if .Values.sandbox.k8s.enabled }}
             - name: K8S_SANDBOX_NAMESPACE
               value: {{ .Values.sandbox.k8s.namespace | quote }}
+            - name: SANDCASTLE_ROOK_URL
+              value: {{ .Values.sandbox.k8s.rookUrl | default (printf "ws://%s.%s.svc.cluster.local:%d/rook/ws" (include "sandcastle.fullname" .) .Release.Namespace (.Values.port | int)) | quote }}
             {{- end }}
             {{- if .Values.secretBackend.gcpProjectId }}
             - name: GCP_PROJECT_ID

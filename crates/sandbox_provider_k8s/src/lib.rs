@@ -5,315 +5,57 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use futures_util::StreamExt;
-use k8s_openapi::api::core::v1::{Container, Pod, PodSpec};
+use k8s_openapi::api::core::v1::{Container, EnvVar, Pod, PodSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{
     Api, Client,
-    api::{AttachParams, DeleteParams, ListParams, PostParams},
+    api::{DeleteParams, ListParams, PostParams},
 };
-use tokio::sync::{RwLock, mpsc, oneshot};
-use tokio_util::io::ReaderStream;
+use tokio::sync::{RwLock, mpsc};
 
-use sandcastle_sandbox_providers_core::{Provider, SandboxHandle, SandboxMessage};
+use sandcastle_rook_proto::{RookCommand, RookResponse};
+use sandcastle_sandbox_providers_core::{
+    Provider, RookConnection, RookRegistry, SandboxHandle, SandboxMessage,
+};
 use sandcastle_util::generate_token;
 
 const WORK_DIR: &str = "/workspace";
 const DEFAULT_TTL: Duration = Duration::from_secs(120 * 60);
+const DEFAULT_IMAGE: &str = "ghcr.io/metalbear-co/sandcastle-rook:latest";
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+struct RookSandbox {
+    conn: RookConnection,
 }
 
-fn exit_code_from_status(
-    status: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Status>,
-) -> i32 {
-    match status {
-        None => -1,
-        Some(s) => {
-            if s.status.as_deref() == Some("Success") {
-                0
-            } else {
-                s.details
-                    .and_then(|d| d.causes)
-                    .and_then(|causes| {
-                        causes
-                            .into_iter()
-                            .find(|c| c.reason.as_deref() == Some("ExitCode"))
-                    })
-                    .and_then(|c| c.message)
-                    .and_then(|m| m.parse::<i32>().ok())
-                    .unwrap_or(-1)
-            }
-        }
-    }
-}
-
-// ── K8sSandbox ────────────────────────────────────────────────────────────────
-
-struct ExecResult {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-struct K8sSandbox {
-    pod_name: String,
-    namespace: String,
-    client: Client,
-}
-
-impl K8sSandbox {
-    fn api(&self) -> Api<Pod> {
-        Api::namespaced(self.client.clone(), &self.namespace)
-    }
-
-    async fn exec_cmd(&self, cmd: &[&str]) -> Result<ExecResult, String> {
-        let api = self.api();
-        let mut attached = api
-            .exec(
-                &self.pod_name,
-                cmd.to_vec(),
-                &AttachParams::default()
-                    .stdin(false)
-                    .stdout(true)
-                    .stderr(true),
-            )
-            .await
-            .map_err(|e| format!("exec failed: {e}"))?;
-
-        let status_rx = attached.take_status();
-
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-
-        if let Some(out) = attached.stdout() {
-            let mut stream = ReaderStream::new(out);
-            while let Some(chunk) = stream.next().await {
-                if let Ok(bytes) = chunk {
-                    stdout.push_str(&String::from_utf8_lossy(&bytes));
-                }
-            }
-        }
-        if let Some(err) = attached.stderr() {
-            let mut stream = ReaderStream::new(err);
-            while let Some(chunk) = stream.next().await {
-                if let Ok(bytes) = chunk {
-                    stderr.push_str(&String::from_utf8_lossy(&bytes));
-                }
-            }
-        }
-
-        let exit_code = if let Some(rx) = status_rx {
-            exit_code_from_status(rx.await)
-        } else {
-            0
-        };
-
-        Ok(ExecResult {
-            exit_code,
-            stdout,
-            stderr,
-        })
-    }
-
-    async fn read_file(&self, path: &str, offset: Option<u32>, limit: Option<u32>) -> String {
-        let script = if offset.is_none() && limit.is_none() {
-            format!("cat -- '{path}'")
-        } else {
-            let start = offset.unwrap_or(1);
-            match limit {
-                Some(n) => {
-                    let end = start + n - 1;
-                    format!(
-                        "awk -v s={start} -v e={end} \
-                         'NR>=s && NR<=e {{printf \"%6d\\t%s\\n\", NR, $0}}' '{path}'"
-                    )
-                }
-                None => format!(
-                    "awk -v s={start} \
-                     'NR>=s {{printf \"%6d\\t%s\\n\", NR, $0}}' '{path}'"
-                ),
-            }
-        };
-        match self.exec_cmd(&["sh", "-c", &script]).await {
-            Ok(r) if r.exit_code == 0 => r.stdout,
-            Ok(r) => format!("Error reading {path}: {}", r.stderr),
-            Err(e) => format!("Error reading {path}: {e}"),
-        }
-    }
-
-    async fn write_file(&self, path: &str, content: &str) -> String {
-        // Use base64 to avoid stdin complexity with K8s exec.
-        // base64 chars are shell-safe: [A-Za-z0-9+/=]
-        let b64 = B64.encode(content.as_bytes());
-        let parent = std::path::Path::new(path)
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let script = if parent.is_empty() {
-            format!("printf '%s' '{b64}' | base64 -d > '{path}'")
-        } else {
-            format!("mkdir -p -- '{parent}' && printf '%s' '{b64}' | base64 -d > '{path}'")
-        };
-        match self.exec_cmd(&["sh", "-c", &script]).await {
-            Ok(r) if r.exit_code == 0 => format!("Written {} bytes to {path}", content.len()),
-            Ok(r) => format!("Error writing {path}: {}", r.stderr),
-            Err(e) => format!("Error writing {path}: {e}"),
-        }
-    }
-
-    async fn edit_file(&self, path: &str, old_string: &str, new_string: &str) -> String {
-        let content = match self
-            .exec_cmd(&["sh", "-c", &format!("cat -- '{path}'")])
-            .await
-        {
-            Ok(r) if r.exit_code == 0 => r.stdout,
-            Ok(r) => return format!("Error reading {path}: {}", r.stderr),
-            Err(e) => return format!("Error reading {path}: {e}"),
-        };
-        let count = content.matches(old_string).count();
-        let new_content = match count {
-            0 => return format!("Error: old_string not found in {path}"),
-            1 => content.replacen(old_string, new_string, 1),
-            n => {
-                return format!(
-                    "Error: old_string matches {n} times in {path} — make it more specific"
-                );
-            }
-        };
-        let b64 = B64.encode(new_content.as_bytes());
-        let script = format!("printf '%s' '{b64}' | base64 -d > '{path}'");
-        match self.exec_cmd(&["sh", "-c", &script]).await {
-            Ok(r) if r.exit_code == 0 => format!("Edited {path}: replaced 1 occurrence"),
-            Ok(r) => format!("Error writing {path}: {}", r.stderr),
-            Err(e) => format!("Error writing {path}: {e}"),
-        }
-    }
-
-    async fn glob(&self, pattern: &str, base_path: Option<String>) -> String {
-        let base = base_path.as_deref().unwrap_or(WORK_DIR);
-        let recursive = pattern.contains("**");
-        let name = pattern.split('/').next_back().unwrap_or(pattern);
-        let prefix = pattern
-            .split("**/")
-            .next()
-            .unwrap_or("")
-            .trim_end_matches('/');
-        let search_base = if prefix.is_empty() {
-            base.to_string()
-        } else {
-            format!("{base}/{prefix}")
-        };
-        let depth_flag = if recursive { "" } else { "-maxdepth 1 " };
-        let cmd = format!(
-            "find '{search_base}' {depth_flag}-name '{name}' -type f 2>/dev/null | sort | head -1000"
-        );
-        match self.exec_cmd(&["sh", "-c", &cmd]).await {
-            Ok(r) => {
-                let matches: Vec<&str> = r.stdout.lines().filter(|l| !l.is_empty()).collect();
-                serde_json::to_string(&matches).unwrap_or_default()
-            }
-            Err(e) => format!("Error: {e}"),
-        }
-    }
-
-    async fn grep(&self, pattern: &str, path: Option<String>, include: Option<String>) -> String {
-        let search_path = path.as_deref().unwrap_or(WORK_DIR);
-        let include_flag = include
-            .as_deref()
-            .map(|i| format!("--include='{i}' "))
-            .unwrap_or_default();
-        let cmd = format!(
-            "grep -rn -E {include_flag}-- '{pattern}' '{search_path}' 2>/dev/null | head -101"
-        );
-        match self.exec_cmd(&["sh", "-c", &cmd]).await {
-            Ok(r) => r.stdout,
-            Err(e) => format!("Error: {e}"),
-        }
-    }
-
-    async fn run_command(
-        &self,
-        command: &str,
-        dir: Option<String>,
-        env: HashMap<String, String>,
-        output_tx: mpsc::Sender<String>,
-        reply: oneshot::Sender<i32>,
-    ) {
-        let work_dir = dir.as_deref().unwrap_or(WORK_DIR);
-
-        // K8s exec doesn't support per-exec env injection; prepend as shell assignments.
-        let env_prefix: String = env
-            .iter()
-            .map(|(k, v)| format!("{}={} ", k, shell_quote(v)))
-            .collect();
-        let full_command = format!("cd {work_dir} && {env_prefix}{command}");
-
-        let api = self.api();
-        let cmd_vec = vec!["sh".to_string(), "-c".to_string(), full_command.clone()];
-        let mut attached = match api
-            .exec(
-                &self.pod_name,
-                cmd_vec,
-                &AttachParams::default()
-                    .stdin(false)
-                    .stdout(true)
-                    .stderr(true),
-            )
-            .await
-        {
-            Ok(a) => a,
+impl RookSandbox {
+    async fn send(&mut self, cmd: &RookCommand) {
+        let json = match serde_json::to_string(cmd) {
+            Ok(s) => s,
             Err(e) => {
-                let _ = output_tx.send(format!("Failed to exec: {e}")).await;
-                let _ = reply.send(-1);
+                tracing::error!("failed to serialize rook command: {e}");
                 return;
             }
         };
-
-        let status_rx = attached.take_status();
-
-        // Stream stdout
-        if let Some(out) = attached.stdout() {
-            let mut stream = ReaderStream::new(out);
-            while let Some(chunk) = stream.next().await {
-                if let Ok(bytes) = chunk {
-                    for line in String::from_utf8_lossy(&bytes).lines() {
-                        if output_tx.send(line.to_string()).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        // Stream stderr
-        if let Some(err) = attached.stderr() {
-            let mut stream = ReaderStream::new(err);
-            while let Some(chunk) = stream.next().await {
-                if let Ok(bytes) = chunk {
-                    for line in String::from_utf8_lossy(&bytes).lines() {
-                        if output_tx.send(line.to_string()).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        drop(output_tx);
-
-        let exit_code = if let Some(rx) = status_rx {
-            exit_code_from_status(rx.await)
-        } else {
-            0
-        };
-        let _ = reply.send(exit_code);
+        let _ = self.conn.sender.send(json);
     }
 
-    pub async fn run(self, mut rx: mpsc::Receiver<SandboxMessage>) {
+    async fn recv(&mut self) -> Option<RookResponse> {
+        let text = self.conn.receiver.recv().await?;
+        match serde_json::from_str::<RookResponse>(&text) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!("failed to deserialize rook response: {e}");
+                None
+            }
+        }
+    }
+
+    pub async fn run(mut self, mut rx: mpsc::Receiver<SandboxMessage>) {
+        let mut req_id: u64 = 0;
+
         while let Some(msg) = rx.recv().await {
+            req_id += 1;
+
             match msg {
                 SandboxMessage::ReadFile {
                     path,
@@ -321,38 +63,111 @@ impl K8sSandbox {
                     limit,
                     reply,
                 } => {
-                    let _ = reply.send(self.read_file(&path, offset, limit).await);
+                    self.send(&RookCommand::ReadFile {
+                        req_id,
+                        path,
+                        offset,
+                        limit,
+                    })
+                    .await;
+                    let out = match self.recv().await {
+                        Some(RookResponse::Result { output, .. }) => output,
+                        Some(RookResponse::Error { message, .. }) => {
+                            format!("Error: {message}")
+                        }
+                        _ => "Error: unexpected response from rook".to_string(),
+                    };
+                    let _ = reply.send(out);
                 }
+
                 SandboxMessage::WriteFile {
                     path,
                     content,
                     reply,
                 } => {
-                    let _ = reply.send(self.write_file(&path, &content).await);
+                    self.send(&RookCommand::WriteFile {
+                        req_id,
+                        path,
+                        content,
+                    })
+                    .await;
+                    let out = match self.recv().await {
+                        Some(RookResponse::Result { output, .. }) => output,
+                        Some(RookResponse::Error { message, .. }) => {
+                            format!("Error: {message}")
+                        }
+                        _ => "Error: unexpected response from rook".to_string(),
+                    };
+                    let _ = reply.send(out);
                 }
+
                 SandboxMessage::EditFile {
                     path,
                     old_string,
                     new_string,
                     reply,
                 } => {
-                    let _ = reply.send(self.edit_file(&path, &old_string, &new_string).await);
+                    self.send(&RookCommand::EditFile {
+                        req_id,
+                        path,
+                        old_string,
+                        new_string,
+                    })
+                    .await;
+                    let out = match self.recv().await {
+                        Some(RookResponse::Result { output, .. }) => output,
+                        Some(RookResponse::Error { message, .. }) => {
+                            format!("Error: {message}")
+                        }
+                        _ => "Error: unexpected response from rook".to_string(),
+                    };
+                    let _ = reply.send(out);
                 }
+
                 SandboxMessage::Glob {
                     pattern,
                     base_path,
                     reply,
                 } => {
-                    let _ = reply.send(self.glob(&pattern, base_path).await);
+                    self.send(&RookCommand::Glob {
+                        req_id,
+                        pattern,
+                        base_path,
+                    })
+                    .await;
+                    let out = match self.recv().await {
+                        Some(RookResponse::Result { output, .. }) => output,
+                        Some(RookResponse::Error { message, .. }) => {
+                            format!("Error: {message}")
+                        }
+                        _ => "Error: unexpected response from rook".to_string(),
+                    };
+                    let _ = reply.send(out);
                 }
+
                 SandboxMessage::Grep {
                     pattern,
                     path,
                     include,
                     reply,
                 } => {
-                    let _ = reply.send(self.grep(&pattern, path, include).await);
+                    self.send(&RookCommand::Grep {
+                        req_id,
+                        pattern,
+                        path,
+                        include,
+                    })
+                    .await;
+                    let out = match self.recv().await {
+                        Some(RookResponse::Result { output, .. }) => output,
+                        Some(RookResponse::Error { message, .. }) => {
+                            format!("Error: {message}")
+                        }
+                        _ => "Error: unexpected response from rook".to_string(),
+                    };
+                    let _ = reply.send(out);
                 }
+
                 SandboxMessage::RunCommand {
                     command,
                     dir,
@@ -360,14 +175,34 @@ impl K8sSandbox {
                     output_tx,
                     reply,
                 } => {
-                    self.run_command(&command, dir, env, output_tx, reply).await;
+                    self.send(&RookCommand::RunCommand {
+                        req_id,
+                        command,
+                        dir,
+                        env,
+                    })
+                    .await;
+                    let exit_code = loop {
+                        match self.recv().await {
+                            Some(RookResponse::Output { line, .. }) => {
+                                let _ = output_tx.send(line).await;
+                            }
+                            Some(RookResponse::Done { exit_code, .. }) => {
+                                break exit_code;
+                            }
+                            Some(RookResponse::Error { message, .. }) => {
+                                let _ = output_tx.send(message).await;
+                                break -1;
+                            }
+                            _ => break -1,
+                        }
+                    };
+                    let _ = reply.send(exit_code);
                 }
             }
         }
     }
 }
-
-// ── K8sProvider ───────────────────────────────────────────────────────────────
 
 struct SandboxRecord {
     handle: SandboxHandle,
@@ -379,6 +214,8 @@ pub struct K8sProvider {
     client: Client,
     namespace: String,
     image: String,
+    rook_url: String,
+    rook_registry: Arc<RookRegistry>,
     sandboxes: Arc<RwLock<HashMap<String, SandboxRecord>>>,
     ttl: Duration,
 }
@@ -392,12 +229,16 @@ impl K8sProvider {
         let client = Client::try_default().await?;
         let namespace = std::env::var("K8S_SANDBOX_NAMESPACE")
             .unwrap_or_else(|_| "sandcastle-sandboxes".to_string());
-        let image = std::env::var("SANDCASTLE_K8S_IMAGE")
-            .unwrap_or_else(|_| "debian:bookworm-slim".to_string());
+        let image =
+            std::env::var("SANDCASTLE_K8S_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_string());
+        let rook_url = std::env::var("SANDCASTLE_ROOK_URL")
+            .unwrap_or_else(|_| "ws://localhost:3000/rook/ws".to_string());
         Ok(Arc::new(Self {
             client,
             namespace,
             image,
+            rook_url,
+            rook_registry: RookRegistry::new(),
             sandboxes: Arc::new(RwLock::new(HashMap::new())),
             ttl,
         }))
@@ -409,7 +250,6 @@ impl K8sProvider {
 
     async fn create_pod(&self, id: &str) -> anyhow::Result<String> {
         let pod_name = format!("sandbox-{id}");
-        let setup = "apt-get update -qq && apt-get install -y -qq git && mkdir -p /workspace && tail -f /dev/null";
 
         let mut labels = std::collections::BTreeMap::new();
         labels.insert("managed-by".to_string(), "sandcastle".to_string());
@@ -427,7 +267,18 @@ impl K8sProvider {
                 containers: vec![Container {
                     name: "sandbox".to_string(),
                     image: Some(self.image.clone()),
-                    command: Some(vec!["sh".to_string(), "-c".to_string(), setup.to_string()]),
+                    env: Some(vec![
+                        EnvVar {
+                            name: "SANDCASTLE_ROOK_URL".to_string(),
+                            value: Some(self.rook_url.clone()),
+                            ..Default::default()
+                        },
+                        EnvVar {
+                            name: "SANDBOX_ID".to_string(),
+                            value: Some(id.to_string()),
+                            ..Default::default()
+                        },
+                    ]),
                     working_dir: Some(WORK_DIR.to_string()),
                     ..Default::default()
                 }],
@@ -438,7 +289,6 @@ impl K8sProvider {
 
         self.api().create(&PostParams::default(), &pod).await?;
 
-        // Wait up to 60s for Running
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             match self.api().get(&pod_name).await {
@@ -524,24 +374,33 @@ impl Provider for K8sProvider {
         "Kubernetes sandbox — each sandbox runs as an isolated Pod"
     }
 
+    fn rook_registry(&self) -> Option<Arc<RookRegistry>> {
+        Some(Arc::clone(&self.rook_registry))
+    }
+
     async fn create(&self, name: String) -> Result<SandboxHandle, String> {
         let id = generate_token()[..16].to_string();
+
+        let conn_rx = self.rook_registry.register(id.clone());
+
         let pod_name = self
             .create_pod(&id)
             .await
             .map_err(|e| format!("failed to create pod: {e}"))?;
 
+        tracing::info!("k8s pod {pod_name} created, waiting for rook to connect");
+
+        let conn = tokio::time::timeout(Duration::from_secs(60), conn_rx)
+            .await
+            .map_err(|_| format!("timed out waiting for rook to connect for sandbox {id}"))?
+            .map_err(|_| format!("rook registry channel dropped for sandbox {id}"))?;
+
+        tracing::info!("rook connected for sandbox {id}");
+
         let (tx, rx) = mpsc::channel(32);
         let handle = SandboxHandle::new(id.clone(), name, PathBuf::from(WORK_DIR), tx);
 
-        tokio::spawn(
-            K8sSandbox {
-                pod_name: pod_name.clone(),
-                namespace: self.namespace.clone(),
-                client: self.client.clone(),
-            }
-            .run(rx),
-        );
+        tokio::spawn(RookSandbox { conn }.run(rx));
 
         self.sandboxes.write().await.insert(
             id,
@@ -551,6 +410,7 @@ impl Provider for K8sProvider {
                 created_at: Instant::now(),
             },
         );
+
         Ok(handle)
     }
 

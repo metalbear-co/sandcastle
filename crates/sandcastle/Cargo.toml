@@ -10,7 +10,9 @@ sandcastle-auth = { workspace = true }
 sandcastle-sandbox-providers = { workspace = true }
 sandcastle-store = { workspace = true }
 sandcastle-secrets = { workspace = true }
+sandcastle-rook-proto = { workspace = true }
 anyhow = { workspace = true }
+futures-util = { workspace = true }
 axum = { workspace = true }
 rmcp = { workspace = true }
 serde = { workspace = true }

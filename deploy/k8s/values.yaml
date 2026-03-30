@@ -54,6 +54,9 @@ sandbox:
     enabled: false
     # Namespace where sandbox pods are created.
     namespace: "sandcastle-sandboxes"
+    # URL that rook pods use to connect back to sandcastle. Leave empty to auto-compute
+    # from the release name, namespace, and port (recommended for in-cluster deployments).
+    rookUrl: ""
   daytona:
     apiKey: ""
 

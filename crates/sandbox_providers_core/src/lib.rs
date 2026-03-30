@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -163,10 +163,51 @@ impl SandboxHandle {
     }
 }
 
+pub struct RookConnection {
+    pub sender: mpsc::UnboundedSender<String>,
+    pub receiver: mpsc::UnboundedReceiver<String>,
+}
+
+pub struct RookRegistry {
+    pending: std::sync::Mutex<HashMap<String, oneshot::Sender<RookConnection>>>,
+}
+
+impl RookRegistry {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            pending: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn register(&self, sandbox_id: String) -> oneshot::Receiver<RookConnection> {
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .expect("rook registry lock poisoned")
+            .insert(sandbox_id, tx);
+        rx
+    }
+
+    pub fn fulfill(&self, sandbox_id: &str, conn: RookConnection) -> bool {
+        let tx = self
+            .pending
+            .lock()
+            .expect("rook registry lock poisoned")
+            .remove(sandbox_id);
+        match tx {
+            Some(tx) => tx.send(conn).is_ok(),
+            None => false,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     async fn create(&self, name: String) -> Result<SandboxHandle, String>;
     async fn resume(&self, id: &str) -> Result<SandboxHandle, String>;
+    fn rook_registry(&self) -> Option<Arc<RookRegistry>> {
+        None
+    }
 }
