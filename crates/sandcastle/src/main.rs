@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    Extension, Router, middleware,
+    Extension, Router,
+    http::StatusCode,
+    middleware,
     routing::{get, post},
 };
 use rmcp::transport::streamable_http_server::{
@@ -136,6 +138,7 @@ async fn main() -> Result<()> {
             "/secrets/{token}",
             get(secret_routes::get_secret_page).post(secret_routes::post_secret_value),
         )
+        .route("/health", get(|| async { StatusCode::OK }))
         .layer(Extension(secret_backend))
         .layer(Extension(BaseUrl(base_url.clone())))
         .layer(Extension(auth_state))
