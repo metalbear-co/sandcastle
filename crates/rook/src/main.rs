@@ -179,16 +179,14 @@ async fn read_file(
 }
 
 async fn write_file(req_id: u64, path: &str, content: &str) -> RookResponse {
-    let parent = std::path::Path::new(path).parent();
-    if let Some(dir) = parent {
-        if !dir.as_os_str().is_empty() {
-            if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                return RookResponse::Error {
-                    req_id,
-                    message: format!("failed to create directories for {path}: {e}"),
-                };
-            }
-        }
+    if let Some(dir) = std::path::Path::new(path).parent()
+        && !dir.as_os_str().is_empty()
+        && let Err(e) = tokio::fs::create_dir_all(dir).await
+    {
+        return RookResponse::Error {
+            req_id,
+            message: format!("failed to create directories for {path}: {e}"),
+        };
     }
     match tokio::fs::write(path, content).await {
         Ok(_) => RookResponse::Result {
