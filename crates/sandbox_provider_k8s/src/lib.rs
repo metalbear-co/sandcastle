@@ -390,7 +390,8 @@ impl K8sProvider {
 
     pub async fn new(ttl: Duration) -> anyhow::Result<Arc<Self>> {
         let client = Client::try_default().await?;
-        let namespace = std::env::var("K8S_NAMESPACE").unwrap_or_else(|_| "sandcastle".to_string());
+        let namespace = std::env::var("K8S_SANDBOX_NAMESPACE")
+            .unwrap_or_else(|_| "sandcastle-sandboxes".to_string());
         let image = std::env::var("SANDCASTLE_K8S_IMAGE")
             .unwrap_or_else(|_| "debian:bookworm-slim".to_string());
         Ok(Arc::new(Self {
@@ -407,7 +408,7 @@ impl K8sProvider {
     }
 
     async fn create_pod(&self, id: &str) -> anyhow::Result<String> {
-        let pod_name = format!("sandcastle-{id}");
+        let pod_name = format!("sandbox-{id}");
         let setup = "apt-get update -qq && apt-get install -y -qq git && mkdir -p /workspace && tail -f /dev/null";
 
         let mut labels = std::collections::BTreeMap::new();

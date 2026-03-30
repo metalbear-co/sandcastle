@@ -49,9 +49,11 @@ sandbox:
   # k8s provider is added automatically when sandbox.k8s.enabled=true.
   providers: ""
   k8s:
-    # Enable the k8s sandbox provider (runs each sandbox as a Pod in K8S_NAMESPACE).
-    # Also adds pod get/list/create/delete permissions to the RBAC Role.
+    # Enable the k8s sandbox provider (runs each sandbox as a Pod in the sandboxes namespace).
+    # Also creates a Role + RoleBinding in the sandboxes namespace with pod permissions.
     enabled: false
+    # Namespace where sandbox pods are created.
+    namespace: "sandcastle-sandboxes"
   daytona:
     apiKey: ""
 

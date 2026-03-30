@@ -1,0 +1,8 @@
+{{- if .Values.sandbox.k8s.enabled }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.sandbox.k8s.namespace }}
+  labels:
+    {{- include "sandcastle.labels" . | nindent 4 }}
+{{- end }}

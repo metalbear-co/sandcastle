@@ -9,9 +9,4 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "patch"]
-  {{- if .Values.sandbox.k8s.enabled }}
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "create", "delete"]
-  {{- end }}
 {{- end }}
