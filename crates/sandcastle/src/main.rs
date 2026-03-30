@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    Extension, Router, http::StatusCode, middleware,
+    Extension, Router,
+    http::StatusCode,
+    middleware,
     routing::{get, post},
 };
 use rmcp::transport::streamable_http_server::{
