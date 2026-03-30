@@ -1,0 +1,78 @@
+image:
+  repository: ghcr.io/metalbear-co/sandcastle
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# HTTP listen port
+port: 3000
+
+# Public base URL for OAuth redirects (required when auth is enabled)
+baseUrl: ""
+
+auth:
+  # Disable auth. Suitable for internal/private deployments.
+  noAuth: true
+  # provider: local | github | google (used when noAuth is false)
+  provider: local
+  # Pre-shared bearer token (stored in k8s Secret)
+  mcpToken: ""
+  # Password for local OAuth approval (stored in k8s Secret)
+  password: ""
+  github:
+    clientId: ""
+    clientSecret: ""
+  google:
+    clientId: ""
+    clientSecret: ""
+
+storage:
+  # memory | postgres
+  # Automatically set to postgres when postgresql.enabled=true
+  backend: memory
+  # Required when backend=postgres and postgresql.enabled=false.
+  # Auto-populated from subchart when postgresql.enabled=true.
+  databaseUrl: ""
+
+secretBackend:
+  # memory | gcp | k8s
+  type: k8s
+  # Namespace for k8s secrets (defaults to release namespace when empty).
+  # Note: if set to a different namespace than the release, a ClusterRole is needed instead of Role.
+  k8sNamespace: ""
+  # Required when type=gcp
+  gcpProjectId: ""
+
+sandbox:
+  # Comma-separated list of extra providers: docker, daytona, local. Leave empty for none.
+  # k8s provider is added automatically when sandbox.k8s.enabled=true.
+  providers: ""
+  k8s:
+    # Enable the k8s sandbox provider (runs each sandbox as a Pod in K8S_NAMESPACE).
+    # Also adds pod get/list/create/delete permissions to the RBAC Role.
+    enabled: false
+  daytona:
+    apiKey: ""
+
+# Optional in-cluster PostgreSQL (Bitnami subchart).
+# When enabled, STORAGE_BACKEND is set to postgres and DATABASE_URL is
+# auto-built from the subchart service name — no manual URL needed.
+postgresql:
+  enabled: false
+  auth:
+    database: sandcastle
+    username: sandcastle
+    password: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tls: []
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
