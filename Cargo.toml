@@ -21,6 +21,8 @@ members = [
     "crates/secrets_memory",
     "crates/secrets_gcp",
     "crates/secrets_k8s",
+    "crates/rook_proto",
+    "crates/rook",
 ]
 resolver = "3"
 
@@ -46,11 +48,13 @@ sandcastle-sandbox-provider-local = { path = "crates/sandbox_provider_local" }
 sandcastle-sandbox-provider-docker = { path = "crates/sandbox_provider_docker" }
 sandcastle-sandbox-provider-daytona = { path = "crates/sandbox_provider_daytona" }
 sandcastle-sandbox-provider-k8s = { path = "crates/sandbox_provider_k8s" }
+sandcastle-rook-proto = { path = "crates/rook_proto" }
 
 # External dependencies
 anyhow = "1"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 base64 = "0.22"
 bollard = "0.18"
 daytona-client = "0.5.0"
