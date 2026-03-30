@@ -9,6 +9,7 @@ sandcastle-sandbox-providers-core = { workspace = true }
 sandcastle-sandbox-provider-local = { workspace = true }
 sandcastle-sandbox-provider-docker = { workspace = true }
 sandcastle-sandbox-provider-daytona = { workspace = true }
+sandcastle-sandbox-provider-k8s = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }

@@ -13,6 +13,7 @@ members = [
     "crates/sandbox_provider_local",
     "crates/sandbox_provider_docker",
     "crates/sandbox_provider_daytona",
+    "crates/sandbox_provider_k8s",
     "crates/store_memory",
     "crates/store_postgres",
     "crates/secrets_core",
@@ -44,6 +45,7 @@ sandcastle-sandbox-providers = { path = "crates/sandbox_providers" }
 sandcastle-sandbox-provider-local = { path = "crates/sandbox_provider_local" }
 sandcastle-sandbox-provider-docker = { path = "crates/sandbox_provider_docker" }
 sandcastle-sandbox-provider-daytona = { path = "crates/sandbox_provider_daytona" }
+sandcastle-sandbox-provider-k8s = { path = "crates/sandbox_provider_k8s" }
 
 # External dependencies
 anyhow = "1"

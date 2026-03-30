@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use sandcastle_sandbox_provider_daytona::DaytonaProvider;
 use sandcastle_sandbox_provider_docker::DockerProvider;
+use sandcastle_sandbox_provider_k8s::K8sProvider;
 use sandcastle_sandbox_provider_local::LocalProvider;
 
 pub async fn load(enabled: &[String]) -> Vec<Arc<dyn Provider>> {
@@ -25,6 +26,18 @@ pub async fn load(enabled: &[String]) -> Vec<Arc<dyn Provider>> {
                 tracing::info!("docker sandbox provider registered");
             }
             Err(e) => tracing::warn!("docker provider unavailable: {e}"),
+        }
+    }
+
+    if enabled.contains(&"k8s".to_string()) {
+        match K8sProvider::from_env().await {
+            Ok(k8s) => {
+                k8s.cleanup_stale_pods().await;
+                k8s.start_cleanup_task();
+                providers.push(k8s);
+                tracing::info!("k8s sandbox provider registered");
+            }
+            Err(e) => tracing::warn!("k8s sandbox provider unavailable: {e}"),
         }
     }
 

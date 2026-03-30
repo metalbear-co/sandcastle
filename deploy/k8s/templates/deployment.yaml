@@ -1,0 +1,152 @@
+{{- $secretName := include "sandcastle.fullname" . }}
+{{- $dbUrl := include "sandcastle.databaseUrl" . }}
+{{- $usePostgres := include "sandcastle.usePostgres" . }}
+{{- $providers := .Values.sandbox.providers }}
+{{- if .Values.sandbox.k8s.enabled }}
+{{-   if $providers }}
+{{-     $providers = printf "%s,k8s" $providers }}
+{{-   else }}
+{{-     $providers = "k8s" }}
+{{-   end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sandcastle.fullname" . }}
+  labels:
+    {{- include "sandcastle.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sandcastle.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sandcastle.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if eq .Values.secretBackend.type "k8s" }}
+      serviceAccountName: {{ include "sandcastle.fullname" . }}
+      {{- else }}
+      automountServiceAccountToken: false
+      {{- end }}
+      containers:
+        - name: sandcastle
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.port | quote }}
+            {{- if .Values.baseUrl }}
+            - name: BASE_URL
+              value: {{ .Values.baseUrl | quote }}
+            {{- end }}
+            {{- if .Values.auth.noAuth }}
+            - name: SANDCASTLE_NO_AUTH
+              value: "true"
+            {{- else }}
+            - name: AUTH_PROVIDER
+              value: {{ .Values.auth.provider | quote }}
+            {{- end }}
+            - name: STORAGE_BACKEND
+              value: {{ if $usePostgres }}"postgres"{{ else }}{{ .Values.storage.backend | quote }}{{ end }}
+            - name: SECRET_BACKEND
+              value: {{ .Values.secretBackend.type | quote }}
+            {{- if eq .Values.secretBackend.type "k8s" }}
+            - name: K8S_NAMESPACE
+              value: {{ default .Release.Namespace .Values.secretBackend.k8sNamespace | quote }}
+            {{- end }}
+            {{- if .Values.secretBackend.gcpProjectId }}
+            - name: GCP_PROJECT_ID
+              value: {{ .Values.secretBackend.gcpProjectId | quote }}
+            {{- end }}
+            {{- if $providers }}
+            - name: SANDCASTLE_PROVIDERS
+              value: {{ $providers | quote }}
+            {{- end }}
+            {{- if .Values.auth.mcpToken }}
+            - name: MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: MCP_TOKEN
+            {{- end }}
+            {{- if .Values.auth.password }}
+            - name: SANDCASTLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: SANDCASTLE_PASSWORD
+            {{- end }}
+            {{- if .Values.auth.github.clientId }}
+            - name: GITHUB_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: GITHUB_OAUTH_CLIENT_ID
+            {{- end }}
+            {{- if .Values.auth.github.clientSecret }}
+            - name: GITHUB_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: GITHUB_OAUTH_CLIENT_SECRET
+            {{- end }}
+            {{- if .Values.auth.google.clientId }}
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: GOOGLE_CLIENT_ID
+            {{- end }}
+            {{- if .Values.auth.google.clientSecret }}
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: GOOGLE_CLIENT_SECRET
+            {{- end }}
+            {{- if $dbUrl }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: DATABASE_URL
+            {{- end }}
+            {{- if .Values.sandbox.daytona.apiKey }}
+            - name: DAYTONA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: DAYTONA_API_KEY
+            {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
