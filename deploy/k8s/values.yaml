@@ -54,6 +54,8 @@ sandbox:
     enabled: false
     # Namespace where sandbox pods are created.
     namespace: "sandcastle-sandboxes"
+    # Container image used for sandbox pods (SANDCASTLE_K8S_IMAGE). Defaults to sandcastle's built-in default when empty.
+    image: ""
     # URL that rook pods use to connect back to sandcastle. Leave empty to auto-compute
     # from the release name, namespace, and port (recommended for in-cluster deployments).
     rookUrl: ""
