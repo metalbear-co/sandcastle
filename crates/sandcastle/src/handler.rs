@@ -24,6 +24,8 @@ use sandcastle_store::{
 };
 
 use sandcastle_github_token_provider::{GitHubDeviceFlowProvider, PollResult};
+
+use crate::github_auth_routes::{AuthStatus, GitHubAuthPendingStore, PendingAuth};
 use sandcastle_secrets::SharedSecretBackend;
 use sandcastle_util::generate_token;
 
@@ -155,6 +157,7 @@ pub struct SandcastleHandler {
     secrets: SharedSecretBackend,
     base_url: String,
     github_token_provider: Option<std::sync::Arc<GitHubDeviceFlowProvider>>,
+    github_auth_pending: GitHubAuthPendingStore,
 }
 
 #[tool_router]
@@ -165,6 +168,7 @@ impl SandcastleHandler {
         secrets: SharedSecretBackend,
         base_url: String,
         github_token_provider: Option<std::sync::Arc<GitHubDeviceFlowProvider>>,
+        github_auth_pending: GitHubAuthPendingStore,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -173,6 +177,7 @@ impl SandcastleHandler {
             secrets,
             base_url,
             github_token_provider,
+            github_auth_pending,
         }
     }
 
@@ -634,10 +639,10 @@ impl SandcastleHandler {
 
     #[tool(
         description = "Generate a GitHub OAuth token via interactive Device Authorization. \
-        Starts the authorization flow, sends the URL and user code as a progress message \
-        for the user to approve in their browser, then waits (up to 15 minutes) for \
-        authorization. On success, stores the token as a secret and returns the secret name. \
-        Use the secret name in run_command's secrets parameter as GITHUB_TOKEN."
+        Returns a sandcastle-hosted URL for the user to visit — the page shows the GitHub \
+        authorization code and polls automatically until the user approves. \
+        Once approved, the token is stored as a secret under secret_name. \
+        Use secret_name in run_command's secrets parameter as GITHUB_TOKEN."
     )]
     async fn get_github_token(
         &self,
@@ -645,10 +650,8 @@ impl SandcastleHandler {
         Parameters(GetGithubTokenParams { repos }): Parameters<GetGithubTokenParams>,
     ) -> String {
         let provider = match &self.github_token_provider {
-            Some(p) => p,
-            None => {
-                return Self::error_json("GitHub token provider is not configured.");
-            }
+            Some(p) => p.clone(),
+            None => return Self::error_json("GitHub token provider is not configured."),
         };
 
         let state = match provider.start_flow(&repos).await {
@@ -656,61 +659,100 @@ impl SandcastleHandler {
             Err(e) => return Self::error_json(&format!("failed to start GitHub auth flow: {e}")),
         };
 
-        // Notify the user of the URL and code they need to authorize.
-        let auth_message = format!(
-            "Please visit {} and enter code: {}",
-            state.verification_uri, state.user_code
-        );
-        if let Some(ref token) = ctx.meta.get_progress_token() {
-            let _ = ctx
-                .peer
-                .send_notification(ServerNotification::ProgressNotification(
-                    ProgressNotification::new(
-                        ProgressNotificationParam::new(token.clone(), 0.0)
-                            .with_message(auth_message.clone()),
-                    ),
-                ))
-                .await;
-        }
-
-        // Poll until authorized, timed out, or expired.
-        let interval = std::time::Duration::from_secs(state.interval.max(5));
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(state.expires_in.min(900));
-
-        let (token, expires_at) = loop {
-            tokio::time::sleep(interval).await;
-
-            if std::time::Instant::now() >= deadline {
-                return Self::error_json("Authorization timed out. The device code has expired.");
-            }
-
-            match provider.poll_token(&state.device_code).await {
-                Ok(PollResult::Complete { token, expires_at }) => break (token, expires_at),
-                Ok(PollResult::Pending) => {}
-                Ok(PollResult::Expired) => {
-                    return Self::error_json("Device code expired before the user authorized.");
-                }
-                Err(e) => return Self::error_json(&format!("failed to poll GitHub token: {e}")),
-            }
-        };
-
         let identity = Self::request_identity(&ctx);
+        let page_token = generate_token();
+        let page_token_bg = page_token.clone();
         let secret_name = format!("github-token-{}", generate_token());
-        // Fall back to 8 hours if the OAuth App does not use token expiration.
-        let expires_at = expires_at
-            .unwrap_or_else(|| SystemTime::now() + std::time::Duration::from_secs(8 * 3600));
-        if let Err(e) = self
-            .secrets
-            .store_secret_with_expiry(&identity.owner_key, &secret_name, &token, expires_at)
-            .await
+
+        // Register the pending flow so the hosted page can display the code.
         {
-            return Self::error_json(&format!("failed to store GitHub token as secret: {e}"));
+            let mut guard = self
+                .github_auth_pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.insert(
+                page_token.clone(),
+                PendingAuth {
+                    status: AuthStatus::Pending {
+                        verification_uri: state.verification_uri.clone(),
+                        user_code: state.user_code.clone(),
+                    },
+                },
+            );
         }
+
+        // Spawn a background task that polls GitHub and stores the token when authorized.
+        let pending_store = self.github_auth_pending.clone();
+        let secrets = self.secrets.clone();
+        let owner_key = identity.owner_key.clone();
+        let secret_name_bg = secret_name.clone();
+        let device_code = state.device_code.clone();
+        let interval = std::time::Duration::from_secs(state.interval.max(5));
+        let expires_in = state.expires_in.min(900);
+
+        tokio::spawn(async move {
+            let page_token = page_token_bg;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(expires_in);
+
+            loop {
+                tokio::time::sleep(interval).await;
+
+                if std::time::Instant::now() >= deadline {
+                    let mut g = pending_store.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(entry) = g.get_mut(&page_token) {
+                        entry.status = AuthStatus::Expired;
+                    }
+                    break;
+                }
+
+                match provider.poll_token(&device_code).await {
+                    Ok(PollResult::Complete { token, expires_at }) => {
+                        let exp = expires_at.unwrap_or_else(|| {
+                            SystemTime::now() + std::time::Duration::from_secs(8 * 3600)
+                        });
+                        let result = secrets
+                            .store_secret_with_expiry(&owner_key, &secret_name_bg, &token, exp)
+                            .await;
+                        let mut g = pending_store.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(entry) = g.get_mut(&page_token) {
+                            entry.status = match result {
+                                Ok(()) => AuthStatus::Complete {
+                                    secret_name: secret_name_bg.clone(),
+                                },
+                                Err(e) => AuthStatus::Error(e.to_string()),
+                            };
+                        }
+                        break;
+                    }
+                    Ok(PollResult::Pending) => {}
+                    Ok(PollResult::Expired) => {
+                        let mut g = pending_store.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(entry) = g.get_mut(&page_token) {
+                            entry.status = AuthStatus::Expired;
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("github device flow poll error: {e}");
+                        let mut g = pending_store.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(entry) = g.get_mut(&page_token) {
+                            entry.status = AuthStatus::Error(e.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
+        let url = format!("{}/github-auth/{}", self.base_url, page_token);
         serde_json::json!({
+            "url": url,
             "secret_name": secret_name,
-            "hint": format!(
-                "Use in run_command as: {{\"GITHUB_TOKEN\": \"{secret_name}\"}}"
+            "message": format!(
+                "Ask the user to visit {} to authorize GitHub access. \
+                Once authorized, the token will be stored as secret \"{secret_name}\". \
+                Use it in run_command as: {{\"GITHUB_TOKEN\": \"{secret_name}\"}}",
+                url
             ),
         })
         .to_string()
