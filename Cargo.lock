@@ -2183,6 +2183,7 @@ dependencies = [
  "axum",
  "futures-util",
  "http-body-util",
+ "reqwest",
  "rmcp",
  "sandcastle-auth",
  "sandcastle-github-token-provider",
