@@ -6,10 +6,10 @@ license = "MIT"
 
 [dependencies]
 sandcastle-sandbox-providers-core = { workspace = true }
+sandcastle-daytona-sdk = { workspace = true }
 sandcastle-util = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-daytona-client = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

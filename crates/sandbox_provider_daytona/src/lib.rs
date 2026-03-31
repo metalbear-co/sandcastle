@@ -1,9 +1,7 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::Result;
-use daytona_client::{
-    DaytonaClient, DaytonaConfig,
-    models::{CreateSandboxParams, ExecuteRequest, SandboxState},
+use sandcastle_daytona_sdk::{
+    DaytonaClient, ExecuteRequest, SessionExecRequest, SessionExecResponse, SpawnPtyRequest,
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
@@ -12,14 +10,10 @@ use sandcastle_sandbox_providers_core::{Provider, SandboxHandle, SandboxMessage}
 use sandcastle_util::generate_token;
 
 const WORK_DIR: &str = "/home/user";
-const DEFAULT_BASE_URL: &str = "https://app.daytona.io/api";
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
-// ── Daytona Sandbox ───────────────────────────────────────────────────────────
-
-struct ExecResult {
-    exit_code: i32,
-    result: String,
-}
+// ── DaytonaSandbox ────────────────────────────────────────────────────────────
 
 struct DaytonaSandbox {
     sandbox_id: Uuid,
@@ -27,57 +21,42 @@ struct DaytonaSandbox {
 }
 
 impl DaytonaSandbox {
-    async fn exec(&self, command: &str, cwd: Option<&str>) -> Result<ExecResult, String> {
-        let req = ExecuteRequest {
-            command: command.to_string(),
-            cwd: cwd.map(|s| s.to_string()),
-            timeout: Some(30),
-        };
+    async fn exec(&self, command: &str, cwd: Option<&str>) -> Result<(i32, String), String> {
         tracing::debug!(sandbox_id = %self.sandbox_id, cmd = command, cwd = ?cwd, "daytona exec");
-        let result = self
+        let resp = self
             .client
-            .process()
-            .execute_with_options(&self.sandbox_id, req)
-            .await
-            .map(|r| ExecResult {
-                exit_code: r.exit_code,
-                result: r.result,
-            })
-            .map_err(|e| e.to_string());
-        match &result {
-            Ok(r) => {
-                tracing::debug!(exit_code = r.exit_code, output = %r.result, "daytona exec result")
-            }
-            Err(e) => tracing::warn!(error = %e, "daytona exec failed"),
-        }
-        result
+            .execute(
+                &self.sandbox_id,
+                ExecuteRequest {
+                    command: command.to_string(),
+                    cwd: cwd.map(|s| s.to_string()),
+                    timeout: Some(30),
+                },
+            )
+            .await?;
+        tracing::debug!(exit_code = resp.exit_code, output = %resp.result, "daytona exec result");
+        Ok((resp.exit_code, resp.result))
     }
 
     async fn read_file(&self, path: &str, offset: Option<u32>, limit: Option<u32>) -> String {
-        match self
-            .client
-            .files()
-            .download_text(&self.sandbox_id, path)
-            .await
-        {
+        match self.client.download_text(&self.sandbox_id, path).await {
             Err(e) => format!("Error reading {path}: {e}"),
             Ok(content) => {
                 if offset.is_none() && limit.is_none() {
-                    content
-                } else {
-                    let start = offset.unwrap_or(1) as usize;
-                    let lines: Vec<&str> = content.lines().collect();
-                    let from = start.saturating_sub(1);
-                    let to = limit
-                        .map(|n| (from + n as usize).min(lines.len()))
-                        .unwrap_or(lines.len());
-                    lines[from..to]
-                        .iter()
-                        .enumerate()
-                        .map(|(i, line)| format!("{:6}\t{}", from + i + 1, line))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    return content;
                 }
+                let start = offset.unwrap_or(1) as usize;
+                let lines: Vec<&str> = content.lines().collect();
+                let from = start.saturating_sub(1);
+                let to = limit
+                    .map(|n| (from + n as usize).min(lines.len()))
+                    .unwrap_or(lines.len());
+                lines[from..to]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| format!("{:6}\t{}", from + i + 1, line))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             }
         }
     }
@@ -85,7 +64,6 @@ impl DaytonaSandbox {
     async fn write_file(&self, path: &str, content: &str) -> String {
         match self
             .client
-            .files()
             .upload_text(&self.sandbox_id, path, content)
             .await
         {
@@ -95,12 +73,7 @@ impl DaytonaSandbox {
     }
 
     async fn edit_file(&self, path: &str, old_string: &str, new_string: &str) -> String {
-        let content = match self
-            .client
-            .files()
-            .download_text(&self.sandbox_id, path)
-            .await
-        {
+        let content = match self.client.download_text(&self.sandbox_id, path).await {
             Ok(c) => c,
             Err(e) => return format!("Error reading {path}: {e}"),
         };
@@ -116,7 +89,6 @@ impl DaytonaSandbox {
         };
         match self
             .client
-            .files()
             .upload_text(&self.sandbox_id, path, &new_content)
             .await
         {
@@ -144,8 +116,8 @@ impl DaytonaSandbox {
             "find '{search_base}' {depth_flag}-name '{name}' -type f 2>/dev/null | sort | head -1000"
         );
         match self.exec(&cmd, None).await {
-            Ok(r) => {
-                let matches: Vec<&str> = r.result.lines().filter(|l| !l.is_empty()).collect();
+            Ok((_, output)) => {
+                let matches: Vec<&str> = output.lines().filter(|l| !l.is_empty()).collect();
                 serde_json::to_string(&matches).unwrap_or_default()
             }
             Err(e) => format!("Error: {e}"),
@@ -162,7 +134,7 @@ impl DaytonaSandbox {
             "grep -rn -E {include_flag}-- '{pattern}' '{search_path}' 2>/dev/null | head -101"
         );
         match self.exec(&cmd, None).await {
-            Ok(r) => r.result,
+            Ok((_, output)) => output,
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -175,24 +147,104 @@ impl DaytonaSandbox {
         output_tx: mpsc::Sender<String>,
         reply: oneshot::Sender<i32>,
     ) {
-        let full_command = if env.is_empty() {
-            command.to_string()
-        } else {
-            let prefix: String = env
-                .iter()
-                .map(|(k, v)| format!("{}={} ", shell_escape(k), shell_escape(v)))
-                .collect();
-            format!("{prefix}{command}")
+        let session_id = match self
+            .client
+            .spawn_pty(
+                &self.sandbox_id,
+                SpawnPtyRequest {
+                    cwd: dir,
+                    envs: env,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = output_tx.send(format!("Failed to spawn PTY: {e}")).await;
+                drop(output_tx);
+                let _ = reply.send(-1);
+                return;
+            }
         };
-        let (exit_code, output) = match self.exec(&full_command, dir.as_deref()).await {
-            Ok(r) => (r.exit_code, r.result),
-            Err(e) => (-1, format!("Failed to run command: {e}")),
+
+        let resp = match self
+            .client
+            .exec_in_pty(
+                &self.sandbox_id,
+                &session_id,
+                SessionExecRequest {
+                    command: command.to_string(),
+                    run_async: Some(true),
+                },
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = output_tx.send(format!("Failed to exec: {e}")).await;
+                drop(output_tx);
+                let _ = reply.send(-1);
+                let _ = self.client.delete_pty(&self.sandbox_id, &session_id).await;
+                return;
+            }
         };
-        if !output.is_empty() {
-            let _ = output_tx.send(output).await;
+
+        let (exit_code, logs) = match resp {
+            // synchronous response (server ignored run_async)
+            SessionExecResponse {
+                cmd_id: None,
+                output,
+                exit_code,
+            } => (exit_code.unwrap_or(-1), output.unwrap_or_default()),
+
+            // asynchronous: poll until done
+            SessionExecResponse {
+                cmd_id: Some(ref cmd_id),
+                ..
+            } => {
+                let exit_code = self.poll_command(&session_id, cmd_id).await;
+                let logs = self
+                    .client
+                    .get_pty_command_logs(&self.sandbox_id, &session_id, cmd_id)
+                    .await
+                    .unwrap_or_default();
+                (exit_code, logs)
+            }
+        };
+
+        if !logs.is_empty() {
+            let _ = output_tx.send(logs).await;
         }
         drop(output_tx);
         let _ = reply.send(exit_code);
+        let _ = self.client.delete_pty(&self.sandbox_id, &session_id).await;
+    }
+
+    async fn poll_command(&self, session_id: &str, cmd_id: &str) -> i32 {
+        let deadline = tokio::time::Instant::now() + COMMAND_TIMEOUT;
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(cmd_id, "command poll timed out");
+                return -1;
+            }
+            match self
+                .client
+                .get_pty_command(&self.sandbox_id, session_id, cmd_id)
+                .await
+            {
+                Ok(sc) => {
+                    if let Some(code) = sc.exit_code {
+                        return code;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "poll error");
+                    return -1;
+                }
+            }
+        }
     }
 
     pub async fn run(self, mut rx: mpsc::Receiver<SandboxMessage>) {
@@ -250,10 +302,6 @@ impl DaytonaSandbox {
     }
 }
 
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 // ── DaytonaProvider ───────────────────────────────────────────────────────────
 
 struct DaytonaRecord {
@@ -267,8 +315,7 @@ pub struct DaytonaProvider {
 
 impl DaytonaProvider {
     pub fn new(api_key: String, base_url: String) -> Result<Arc<Self>, String> {
-        let config = DaytonaConfig::new(api_key).with_base_url(base_url);
-        let client = DaytonaClient::new(config).map_err(|e| e.to_string())?;
+        let client = DaytonaClient::new(api_key, base_url)?;
         Ok(Arc::new(Self {
             client: Arc::new(client),
             sandboxes: Arc::new(RwLock::new(HashMap::new())),
@@ -280,7 +327,7 @@ impl DaytonaProvider {
             anyhow::anyhow!("DAYTONA_API_KEY is required to use the Daytona provider")
         })?;
         let base_url = std::env::var("DAYTONA_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+            .unwrap_or_else(|_| "https://app.daytona.io/api".to_string())
             .trim_end_matches('/')
             .to_string();
         Self::new(api_key, base_url).map_err(|e| anyhow::anyhow!(e))
@@ -298,18 +345,9 @@ impl Provider for DaytonaProvider {
     }
 
     async fn create(&self, name: String) -> Result<SandboxHandle, String> {
-        let sandbox = self
-            .client
-            .sandboxes()
-            .create(CreateSandboxParams::default())
-            .await
-            .map_err(|e| e.to_string())?;
+        let sandbox = self.client.create_sandbox().await?;
 
-        self.client
-            .sandboxes()
-            .wait_for_state(&sandbox.id, SandboxState::Started, 120)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.client.wait_until_started(&sandbox.id, 120).await?;
 
         let id = generate_token()[..16].to_string();
         let work_dir = PathBuf::from(WORK_DIR);
