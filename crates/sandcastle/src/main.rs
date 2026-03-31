@@ -1,4 +1,5 @@
 mod config;
+mod github_auth_routes;
 mod handler;
 mod rook_ws;
 mod secret_routes;
@@ -27,6 +28,7 @@ use sandcastle_auth::{AuthState, SharedAuthState};
 
 use sandcastle_github_token_provider::GitHubDeviceFlowProvider;
 
+use github_auth_routes::GitHubAuthPendingStore;
 use handler::SandcastleHandler;
 use secret_routes::BaseUrl;
 
@@ -118,6 +120,11 @@ async fn main() -> Result<()> {
         }
     };
 
+    // ── GitHub auth pending store (shared across all connections) ────────────
+
+    let github_auth_pending: GitHubAuthPendingStore =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
     // ── MCP service ───────────────────────────────────────────────────────────
 
     let service = StreamableHttpService::new(
@@ -126,6 +133,7 @@ async fn main() -> Result<()> {
             let store = store.clone();
             let base_url = base_url.clone();
             let github_token_provider = github_token_provider.clone();
+            let github_auth_pending = github_auth_pending.clone();
             move || {
                 Ok(SandcastleHandler::new(
                     store.clone(),
@@ -133,6 +141,7 @@ async fn main() -> Result<()> {
                     secret_backend.clone(),
                     base_url.clone(),
                     github_token_provider.clone(),
+                    github_auth_pending.clone(),
                 ))
             }
         },
@@ -162,10 +171,19 @@ async fn main() -> Result<()> {
             "/secrets/{token}",
             get(secret_routes::get_secret_page).post(secret_routes::post_secret_value),
         )
+        .route(
+            "/github-auth/{token}",
+            get(github_auth_routes::get_github_auth_page),
+        )
+        .route(
+            "/github-auth/{token}/status",
+            get(github_auth_routes::get_github_auth_status),
+        )
         .route("/health", get(|| async { StatusCode::OK }))
         .route("/rook/ws", get(rook_ws::rook_ws_handler))
         .layer(Extension(rook_registry))
         .layer(Extension(secret_backend))
+        .layer(Extension(github_auth_pending))
         .layer(Extension(BaseUrl(base_url.clone())))
         .layer(Extension(auth_state))
         .layer(CorsLayer::permissive())
