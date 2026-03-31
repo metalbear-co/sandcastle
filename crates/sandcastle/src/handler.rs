@@ -149,6 +149,46 @@ struct ListSandboxesParams {
     provider: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PushToBranchParams {
+    #[schemars(
+        description = "Sandbox ID to operate on. Optional when this client has an active sandbox."
+    )]
+    sandbox_id: Option<String>,
+    #[schemars(description = "Branch to push to, e.g. \"main\" or \"feature/foo\"")]
+    branch: String,
+    #[schemars(description = "Working directory for git commands (default: sandbox work_dir)")]
+    directory: Option<String>,
+    #[schemars(description = "Commit message")]
+    message: String,
+    #[schemars(
+        description = "Name of the stored secret containing the GitHub token, as registered via store_secret or get_github_token"
+    )]
+    secret: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreatePrParams {
+    #[schemars(description = "Branch with changes to merge (head), e.g. \"feature/foo\"")]
+    source_branch: String,
+    #[schemars(description = "Repository containing the source branch, in \"owner/repo\" format")]
+    source_repo: String,
+    #[schemars(description = "Target branch to merge into (base), e.g. \"main\"")]
+    destination_branch: String,
+    #[schemars(
+        description = "Repository where the pull request will be created, in \"owner/repo\" format"
+    )]
+    destination_repo: String,
+    #[schemars(description = "Pull request title")]
+    title: String,
+    #[schemars(description = "Pull request body / description (optional)")]
+    body: Option<String>,
+    #[schemars(
+        description = "Name of the stored secret containing the GitHub token, as registered via store_secret or get_github_token"
+    )]
+    secret: String,
+}
+
 #[derive(Clone)]
 pub struct SandcastleHandler {
     tool_router: ToolRouter<Self>,
@@ -756,6 +796,146 @@ impl SandcastleHandler {
             ),
         })
         .to_string()
+    }
+
+    #[tool(description = "Stage all changes, commit, and push to a branch. \
+        Requires a stored GitHub token secret (from store_secret or get_github_token). \
+        The token is passed securely via environment variable and never embedded in the command.")]
+    async fn push_to_branch(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(PushToBranchParams {
+            sandbox_id,
+            branch,
+            directory,
+            message,
+            secret,
+        }): Parameters<PushToBranchParams>,
+    ) -> String {
+        let identity = Self::request_identity(&ctx);
+
+        let token = match self.secrets.get_secret(&identity.owner_key, &secret).await {
+            Some(t) => t,
+            None => {
+                return Self::error_json(&format!(
+                    "secret '{secret}' not found. Call store_secret or get_github_token first."
+                ));
+            }
+        };
+
+        let escaped_message = message.replace('\'', "'\\''");
+        let command = format!(
+            "git add -A && git commit -m '{escaped_message}' && \
+             git -c credential.helper='!f() {{ printf \"username=x-access-token\\npassword=$GIT_TOKEN\\n\"; }}; f' \
+             push origin {branch}"
+        );
+
+        let mut env = HashMap::new();
+        env.insert("GIT_TOKEN".to_string(), token);
+
+        match self.resolve_sandbox(&identity, sandbox_id.as_deref()).await {
+            Err(e) => e,
+            Ok(s) => {
+                let (mut output_rx, done_rx) = s.run_command(&command, directory, env).await;
+                let mut accumulated = String::new();
+                while let Some(line) = output_rx.recv().await {
+                    accumulated.push_str(&line);
+                    accumulated.push('\n');
+                }
+                match done_rx.await {
+                    Ok(exit_code) => format!("exit_code: {exit_code}\n{accumulated}"),
+                    Err(_) => format!("exit_code: -1\n{accumulated}"),
+                }
+            }
+        }
+    }
+
+    #[tool(description = "Create a GitHub pull request. \
+        Requires a stored GitHub token secret (from store_secret or get_github_token). \
+        For cross-repo PRs (forks), provide both source_repo and destination_repo.")]
+    async fn create_pr(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(CreatePrParams {
+            source_branch,
+            source_repo,
+            destination_branch,
+            destination_repo,
+            title,
+            body,
+            secret,
+        }): Parameters<CreatePrParams>,
+    ) -> String {
+        let identity = Self::request_identity(&ctx);
+
+        let token = match self.secrets.get_secret(&identity.owner_key, &secret).await {
+            Some(t) => t,
+            None => {
+                return Self::error_json(&format!(
+                    "secret '{secret}' not found. Call store_secret or get_github_token first."
+                ));
+            }
+        };
+
+        let dest_parts: Vec<&str> = destination_repo.splitn(2, '/').collect();
+        if dest_parts.len() != 2 {
+            return Self::error_json(
+                "destination_repo must be in \"owner/repo\" format, e.g. \"octocat/hello-world\"",
+            );
+        }
+        let dest_owner = dest_parts[0];
+        let dest_repo = dest_parts[1];
+
+        let head = if source_repo == destination_repo {
+            source_branch.clone()
+        } else {
+            let src_owner = source_repo.split('/').next().unwrap_or(&source_repo);
+            format!("{src_owner}:{source_branch}")
+        };
+
+        let payload = serde_json::json!({
+            "title": title,
+            "body": body.unwrap_or_default(),
+            "head": head,
+            "base": destination_branch,
+        });
+
+        let client = reqwest::Client::new();
+        let resp = match client
+            .post(format!(
+                "https://api.github.com/repos/{dest_owner}/{dest_repo}/pulls"
+            ))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "sandcastle")
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return Self::error_json(&format!("HTTP request failed: {e}")),
+        };
+
+        let status = resp.status();
+        let json: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => return Self::error_json(&format!("failed to parse GitHub response: {e}")),
+        };
+
+        if status.as_u16() == 201 {
+            serde_json::json!({
+                "pr_url": json["html_url"],
+                "pr_number": json["number"],
+            })
+            .to_string()
+        } else {
+            let message = json["message"]
+                .as_str()
+                .unwrap_or("unknown error")
+                .to_string();
+            Self::error_json(&format!("GitHub API error {status}: {message}"))
+        }
     }
 }
 
