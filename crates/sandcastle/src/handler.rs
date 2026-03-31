@@ -203,6 +203,35 @@ impl SandcastleHandler {
         .to_string()
     }
 
+    /// Returns a sanitized copy of an arguments map for logging.
+    /// Fields that may contain user content are truncated to avoid emitting large blobs or
+    /// sensitive values into logs.
+    fn sanitize_args(
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        const OPEN_TEXT: &[&str] = &["content", "command", "old_string", "new_string"];
+        const TRIM_LEN: usize = 8;
+
+        args.iter()
+            .map(|(k, v)| {
+                let sanitized = if OPEN_TEXT.contains(&k.as_str()) {
+                    if let Some(s) = v.as_str() {
+                        let mut trimmed: String = s.chars().take(TRIM_LEN).collect();
+                        if s.chars().count() > TRIM_LEN {
+                            trimmed.push('…');
+                        }
+                        serde_json::Value::String(trimmed)
+                    } else {
+                        v.clone()
+                    }
+                } else {
+                    v.clone()
+                };
+                (k.clone(), sanitized)
+            })
+            .collect()
+    }
+
     async fn resume_known_sandbox(&self, sandbox_id: &str) -> Result<SandboxHandle, String> {
         for p in &self.providers {
             if let Ok(handle) = p.resume(sandbox_id).await {
@@ -707,6 +736,8 @@ impl ServerHandler for SandcastleHandler {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let sanitized = request.arguments.as_ref().map(Self::sanitize_args);
+        tracing::info!(tool = %request.name, args = ?sanitized, "tool call");
         let tcc = ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
     }
