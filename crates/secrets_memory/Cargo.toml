@@ -8,3 +8,4 @@ license = "MIT"
 sandcastle-secrets-core = { workspace = true }
 sandcastle-util = { workspace = true }
 async-trait = { workspace = true }
+anyhow = { workspace = true }

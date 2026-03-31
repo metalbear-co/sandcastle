@@ -22,7 +22,9 @@ use sandcastle_store::{
     types::{SandboxRecord, now_secs},
 };
 
+use sandcastle_github_token_provider::GitHubAppTokenProvider;
 use sandcastle_secrets::SharedSecretBackend;
+use sandcastle_util::generate_token;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CreateSandboxParams {
@@ -131,6 +133,14 @@ struct StoreSecretParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct GetGithubTokenParams {
+    #[schemars(
+        description = "Repository names to scope the token to, e.g. [\"my-repo\"] or [\"owner/my-repo\"]. All repos must be accessible via the configured GitHub App installation."
+    )]
+    repos: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ListSandboxesParams {
     #[schemars(description = "Optional provider filter, e.g. \"docker\"")]
     provider: Option<String>,
@@ -143,6 +153,7 @@ pub struct SandcastleHandler {
     providers: Vec<std::sync::Arc<dyn Provider>>,
     secrets: SharedSecretBackend,
     base_url: String,
+    github_token_provider: Option<std::sync::Arc<GitHubAppTokenProvider>>,
 }
 
 #[tool_router]
@@ -152,6 +163,7 @@ impl SandcastleHandler {
         providers: Vec<std::sync::Arc<dyn Provider>>,
         secrets: SharedSecretBackend,
         base_url: String,
+        github_token_provider: Option<std::sync::Arc<GitHubAppTokenProvider>>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -159,6 +171,7 @@ impl SandcastleHandler {
             providers,
             secrets,
             base_url,
+            github_token_provider,
         }
     }
 
@@ -588,6 +601,56 @@ impl SandcastleHandler {
         })
         .to_string()
     }
+
+    #[tool(
+        description = "Generate a scoped GitHub installation token via the configured GitHub App \
+        and store it as a secret. Returns the secret name and expiry. Use the secret name in \
+        run_command's secrets parameter as GITHUB_TOKEN to clone, push, and open pull requests. \
+        All repos must belong to the configured installation. \
+        Requires GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID to be set."
+    )]
+    async fn get_github_token(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(GetGithubTokenParams { repos }): Parameters<GetGithubTokenParams>,
+    ) -> String {
+        let provider = match &self.github_token_provider {
+            Some(p) => p,
+            None => {
+                return Self::error_json(
+                    "GitHub App token provider is not configured. \
+                     Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID.",
+                );
+            }
+        };
+        let gh_token = match provider.get_token(&repos).await {
+            Ok(t) => t,
+            Err(e) => return Self::error_json(&format!("failed to get GitHub token: {e}")),
+        };
+        let identity = Self::request_identity(&ctx);
+        let secret_name = format!("github-token-{}", generate_token());
+        let expires_at_str = humantime::format_rfc3339(gh_token.expires_at).to_string();
+        if let Err(e) = self
+            .secrets
+            .store_secret_with_expiry(
+                &identity.owner_key,
+                &secret_name,
+                &gh_token.token,
+                gh_token.expires_at,
+            )
+            .await
+        {
+            return Self::error_json(&format!("failed to store GitHub token as secret: {e}"));
+        }
+        serde_json::json!({
+            "secret_name": secret_name,
+            "expires_at": expires_at_str,
+            "hint": format!(
+                "Use in run_command as: {{\"GITHUB_TOKEN\": \"{secret_name}\"}}"
+            ),
+        })
+        .to_string()
+    }
 }
 
 impl ServerHandler for SandcastleHandler {
@@ -619,7 +682,8 @@ impl ServerHandler for SandcastleHandler {
                 \n- grep(pattern, path?, include?): search file contents with regex\
                 \n- list_secrets(): list names of stored secrets for this client — call this before run_command/push_to_branch/create_pr to discover available secrets\
                 \n- run_command(command, dir?, secrets?): run a shell command; secrets maps env var names to secret names set via store_secret; call list_secrets first to discover available secrets\
-                \n- store_secret(name): register a secret slot and get a URL to set its value; returns provider=generic URL"
+                \n- store_secret(name): register a secret slot and get a URL to set its value; returns provider=generic URL\
+                \n- get_github_token(repos): generate a scoped GitHub installation token and store it as a secret; returns secret_name and expires_at; use secret_name in run_command secrets; requires GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_INSTALLATION_ID"
             )
     }
 

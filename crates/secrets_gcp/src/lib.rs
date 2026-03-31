@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use async_trait::async_trait;
 use sandcastle_secrets_core::SecretBackend;
 use sandcastle_store_core::{SharedStateStore, types::now_secs};
@@ -58,16 +60,29 @@ impl GcpSecretManagerBackend {
     }
 
     /// Create or update a secret and add a new version with the given payload.
-    async fn upsert_secret(&self, secret_id: &str, value: &str) -> anyhow::Result<()> {
+    /// If `expire_time` is provided it is set as an RFC 3339 timestamp on the secret resource
+    /// so that GCP auto-deletes it after expiry.
+    async fn upsert_secret(
+        &self,
+        secret_id: &str,
+        value: &str,
+        expire_time: Option<SystemTime>,
+    ) -> anyhow::Result<()> {
         let token = self.access_token().await?;
         let parent = format!("projects/{}", self.project_id);
         let base = "https://secretmanager.googleapis.com/v1";
 
-        // Try to create the secret (idempotent if it already exists).
-        let create_body = serde_json::json!({
+        // Build the secret resource body.
+        let mut create_body = serde_json::json!({
             "replication": { "automatic": {} },
             "labels": { "managed-by": "sandcastle" }
         });
+        if let Some(exp) = expire_time {
+            let formatted = humantime::format_rfc3339(exp).to_string();
+            create_body["expireTime"] = serde_json::Value::String(formatted);
+        }
+
+        // Try to create the secret (idempotent if it already exists).
         let _create = self
             .http
             .post(format!("{base}/{parent}/secrets?secretId={secret_id}"))
@@ -186,7 +201,7 @@ impl SecretBackend for GcpSecretManagerBackend {
             .ok_or_else(|| "Invalid or expired token".to_string())?;
 
         let secret_id = Self::secret_id(&owner_key, &name);
-        self.upsert_secret(&secret_id, value)
+        self.upsert_secret(&secret_id, value, None)
             .await
             .map_err(|e: anyhow::Error| format!("Failed to store secret: {e}"))?;
         Ok(name)
@@ -209,5 +224,17 @@ impl SecretBackend for GcpSecretManagerBackend {
                 tracing::warn!("gcp: get_secret failed: {e}");
                 None
             })
+    }
+
+    async fn store_secret_with_expiry(
+        &self,
+        owner_key: &str,
+        name: &str,
+        value: &str,
+        expires_at: SystemTime,
+    ) -> anyhow::Result<()> {
+        let secret_id = Self::secret_id(owner_key, name);
+        self.upsert_secret(&secret_id, value, Some(expires_at))
+            .await
     }
 }

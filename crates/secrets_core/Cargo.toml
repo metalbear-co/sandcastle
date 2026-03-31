@@ -6,3 +6,4 @@ license = "MIT"
 
 [dependencies]
 async-trait = { workspace = true }
+anyhow = { workspace = true }
