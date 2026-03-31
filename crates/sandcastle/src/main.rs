@@ -25,7 +25,7 @@ use sandcastle_auth::handlers::{
 use sandcastle_auth::middleware::require_auth;
 use sandcastle_auth::{AuthState, SharedAuthState};
 
-use sandcastle_github_token_provider::GitHubAppTokenProvider;
+use sandcastle_github_token_provider::GitHubDeviceFlowProvider;
 
 use handler::SandcastleHandler;
 use secret_routes::BaseUrl;
@@ -101,20 +101,19 @@ async fn main() -> Result<()> {
 
     let rook_registry = providers.iter().find_map(|p| p.rook_registry());
 
-    let github_token_provider = match GitHubAppTokenProvider::from_env() {
+    let github_token_provider = match GitHubDeviceFlowProvider::from_env() {
         Ok(Some(p)) => {
-            info!(
-                "github app token provider: configured (app_id={})",
-                p.app_id()
-            );
+            info!("github device flow token provider: configured");
             Some(std::sync::Arc::new(p))
         }
         Ok(None) => {
-            tracing::debug!("github app token provider: not configured (GITHUB_APP_ID not set)");
+            tracing::debug!(
+                "github device flow token provider: not configured (GITHUB_OAUTH_CLIENT_ID not set)"
+            );
             None
         }
         Err(e) => {
-            tracing::warn!("github app token provider: misconfigured, disabling: {e}");
+            tracing::warn!("github device flow token provider: misconfigured, disabling: {e}");
             None
         }
     };

@@ -13,7 +13,6 @@ sandcastle-secrets = { workspace = true }
 sandcastle-rook-proto = { workspace = true }
 sandcastle-github-token-provider = { workspace = true }
 anyhow = { workspace = true }
-humantime = { workspace = true }
 futures-util = { workspace = true }
 axum = { workspace = true }
 rmcp = { workspace = true }

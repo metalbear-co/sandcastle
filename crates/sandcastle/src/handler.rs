@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use anyhow::Result;
 use rmcp::{
@@ -22,7 +23,7 @@ use sandcastle_store::{
     types::{SandboxRecord, now_secs},
 };
 
-use sandcastle_github_token_provider::GitHubAppTokenProvider;
+use sandcastle_github_token_provider::{GitHubDeviceFlowProvider, PollResult};
 use sandcastle_secrets::SharedSecretBackend;
 use sandcastle_util::generate_token;
 
@@ -135,7 +136,7 @@ struct StoreSecretParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GetGithubTokenParams {
     #[schemars(
-        description = "Repository names to scope the token to, e.g. [\"my-repo\"] or [\"owner/my-repo\"]. All repos must be accessible via the configured GitHub App installation."
+        description = "Repository names the token will be used for, e.g. [\"my-repo\"] or [\"owner/my-repo\"]. Shown to the user for context; does not restrict the OAuth token scope."
     )]
     repos: Vec<String>,
 }
@@ -153,7 +154,7 @@ pub struct SandcastleHandler {
     providers: Vec<std::sync::Arc<dyn Provider>>,
     secrets: SharedSecretBackend,
     base_url: String,
-    github_token_provider: Option<std::sync::Arc<GitHubAppTokenProvider>>,
+    github_token_provider: Option<std::sync::Arc<GitHubDeviceFlowProvider>>,
 }
 
 #[tool_router]
@@ -163,7 +164,7 @@ impl SandcastleHandler {
         providers: Vec<std::sync::Arc<dyn Provider>>,
         secrets: SharedSecretBackend,
         base_url: String,
-        github_token_provider: Option<std::sync::Arc<GitHubAppTokenProvider>>,
+        github_token_provider: Option<std::sync::Arc<GitHubDeviceFlowProvider>>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -632,11 +633,11 @@ impl SandcastleHandler {
     }
 
     #[tool(
-        description = "Generate a scoped GitHub installation token via the configured GitHub App \
-        and store it as a secret. Returns the secret name and expiry. Use the secret name in \
-        run_command's secrets parameter as GITHUB_TOKEN to clone, push, and open pull requests. \
-        All repos must belong to the configured installation. \
-        Requires GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID to be set."
+        description = "Generate a GitHub OAuth token via interactive Device Authorization. \
+        Starts the authorization flow, sends the URL and user code as a progress message \
+        for the user to approve in their browser, then waits (up to 15 minutes) for \
+        authorization. On success, stores the token as a secret and returns the secret name. \
+        Use the secret name in run_command's secrets parameter as GITHUB_TOKEN."
     )]
     async fn get_github_token(
         &self,
@@ -646,34 +647,68 @@ impl SandcastleHandler {
         let provider = match &self.github_token_provider {
             Some(p) => p,
             None => {
-                return Self::error_json(
-                    "GitHub App token provider is not configured. \
-                     Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID.",
-                );
+                return Self::error_json("GitHub token provider is not configured.");
             }
         };
-        let gh_token = match provider.get_token(&repos).await {
-            Ok(t) => t,
-            Err(e) => return Self::error_json(&format!("failed to get GitHub token: {e}")),
+
+        let state = match provider.start_flow(&repos).await {
+            Ok(s) => s,
+            Err(e) => return Self::error_json(&format!("failed to start GitHub auth flow: {e}")),
         };
+
+        // Notify the user of the URL and code they need to authorize.
+        let auth_message = format!(
+            "Please visit {} and enter code: {}",
+            state.verification_uri, state.user_code
+        );
+        if let Some(ref token) = ctx.meta.get_progress_token() {
+            let _ = ctx
+                .peer
+                .send_notification(ServerNotification::ProgressNotification(
+                    ProgressNotification::new(
+                        ProgressNotificationParam::new(token.clone(), 0.0)
+                            .with_message(auth_message.clone()),
+                    ),
+                ))
+                .await;
+        }
+
+        // Poll until authorized, timed out, or expired.
+        let interval = std::time::Duration::from_secs(state.interval.max(5));
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(state.expires_in.min(900));
+
+        let (token, expires_at) = loop {
+            tokio::time::sleep(interval).await;
+
+            if std::time::Instant::now() >= deadline {
+                return Self::error_json("Authorization timed out. The device code has expired.");
+            }
+
+            match provider.poll_token(&state.device_code).await {
+                Ok(PollResult::Complete { token, expires_at }) => break (token, expires_at),
+                Ok(PollResult::Pending) => {}
+                Ok(PollResult::Expired) => {
+                    return Self::error_json("Device code expired before the user authorized.");
+                }
+                Err(e) => return Self::error_json(&format!("failed to poll GitHub token: {e}")),
+            }
+        };
+
         let identity = Self::request_identity(&ctx);
         let secret_name = format!("github-token-{}", generate_token());
-        let expires_at_str = humantime::format_rfc3339(gh_token.expires_at).to_string();
+        // Fall back to 8 hours if the OAuth App does not use token expiration.
+        let expires_at = expires_at
+            .unwrap_or_else(|| SystemTime::now() + std::time::Duration::from_secs(8 * 3600));
         if let Err(e) = self
             .secrets
-            .store_secret_with_expiry(
-                &identity.owner_key,
-                &secret_name,
-                &gh_token.token,
-                gh_token.expires_at,
-            )
+            .store_secret_with_expiry(&identity.owner_key, &secret_name, &token, expires_at)
             .await
         {
             return Self::error_json(&format!("failed to store GitHub token as secret: {e}"));
         }
         serde_json::json!({
             "secret_name": secret_name,
-            "expires_at": expires_at_str,
             "hint": format!(
                 "Use in run_command as: {{\"GITHUB_TOKEN\": \"{secret_name}\"}}"
             ),
@@ -712,7 +747,7 @@ impl ServerHandler for SandcastleHandler {
                 \n- list_secrets(): list names of stored secrets for this client — call this before run_command/push_to_branch/create_pr to discover available secrets\
                 \n- run_command(command, dir?, secrets?): run a shell command; secrets maps env var names to secret names set via store_secret; call list_secrets first to discover available secrets\
                 \n- store_secret(name): register a secret slot and get a URL to set its value; returns provider=generic URL\
-                \n- get_github_token(repos): generate a scoped GitHub installation token and store it as a secret; returns secret_name and expires_at; use secret_name in run_command secrets; requires GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_INSTALLATION_ID"
+                \n- get_github_token(repos): interactive GitHub Device Flow; sends the user a URL+code to authorize in their browser, waits for approval, then stores the token as a secret and returns the secret name"
             )
     }
 

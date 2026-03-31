@@ -74,5 +74,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "1"
 walkdir = "2"
-jsonwebtoken = "9"
 humantime = "2"
