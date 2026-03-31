@@ -25,6 +25,8 @@ use sandcastle_auth::handlers::{
 use sandcastle_auth::middleware::require_auth;
 use sandcastle_auth::{AuthState, SharedAuthState};
 
+use sandcastle_github_token_provider::GitHubAppTokenProvider;
+
 use handler::SandcastleHandler;
 use secret_routes::BaseUrl;
 
@@ -99,6 +101,24 @@ async fn main() -> Result<()> {
 
     let rook_registry = providers.iter().find_map(|p| p.rook_registry());
 
+    let github_token_provider = match GitHubAppTokenProvider::from_env() {
+        Ok(Some(p)) => {
+            info!(
+                "github app token provider: configured (app_id={})",
+                p.app_id()
+            );
+            Some(std::sync::Arc::new(p))
+        }
+        Ok(None) => {
+            tracing::debug!("github app token provider: not configured (GITHUB_APP_ID not set)");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("github app token provider: misconfigured, disabling: {e}");
+            None
+        }
+    };
+
     // ── MCP service ───────────────────────────────────────────────────────────
 
     let service = StreamableHttpService::new(
@@ -106,12 +126,14 @@ async fn main() -> Result<()> {
             let secret_backend = secret_backend.clone();
             let store = store.clone();
             let base_url = base_url.clone();
+            let github_token_provider = github_token_provider.clone();
             move || {
                 Ok(SandcastleHandler::new(
                     store.clone(),
                     providers.clone(),
                     secret_backend.clone(),
                     base_url.clone(),
+                    github_token_provider.clone(),
                 ))
             }
         },

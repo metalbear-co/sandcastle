@@ -23,6 +23,7 @@ members = [
     "crates/secrets_k8s",
     "crates/rook_proto",
     "crates/rook",
+    "crates/github_token_provider",
 ]
 resolver = "3"
 
@@ -49,6 +50,7 @@ sandcastle-sandbox-provider-docker = { path = "crates/sandbox_provider_docker" }
 sandcastle-sandbox-provider-daytona = { path = "crates/sandbox_provider_daytona" }
 sandcastle-sandbox-provider-k8s = { path = "crates/sandbox_provider_k8s" }
 sandcastle-rook-proto = { path = "crates/rook_proto" }
+sandcastle-github-token-provider = { path = "crates/github_token_provider" }
 
 # External dependencies
 anyhow = "1"
@@ -72,3 +74,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "1"
 walkdir = "2"
+jsonwebtoken = "9"
+humantime = "2"

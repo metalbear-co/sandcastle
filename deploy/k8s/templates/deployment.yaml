@@ -134,6 +134,27 @@ spec:
                   name: {{ $secretName }}
                   key: DAYTONA_API_KEY
             {{- end }}
+            {{- if .Values.githubApp.appId }}
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: GITHUB_APP_ID
+            {{- end }}
+            {{- if .Values.githubApp.privateKey }}
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: GITHUB_APP_PRIVATE_KEY
+            {{- end }}
+            {{- if .Values.githubApp.installationId }}
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: GITHUB_APP_INSTALLATION_ID
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /health

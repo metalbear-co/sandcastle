@@ -1,3 +1,8 @@
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::Secret;
 use kube::{
@@ -7,7 +12,6 @@ use kube::{
 use sandcastle_secrets_core::SecretBackend;
 use sandcastle_store_core::{SharedStateStore, types::now_secs};
 use sandcastle_util::generate_token;
-use std::collections::BTreeMap;
 
 /// Kubernetes Secrets backend. Pending upload tokens are persisted in the
 /// shared StateStore. Secrets are stored as Kubernetes Secret objects.
@@ -49,6 +53,24 @@ impl K8sSecretBackend {
 
     fn api(&self) -> Api<Secret> {
         Api::namespaced(self.client.clone(), &self.namespace)
+    }
+
+    /// Returns `true` if the secret has an expiry annotation and it is in the past.
+    fn is_expired(secret: &Secret) -> bool {
+        secret
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("sandcastle.metalbear.co/expires-at"))
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|exp_secs| {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                now >= exp_secs
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -129,6 +151,7 @@ impl SecretBackend for K8sSecretBackend {
                 let prefix = format!("sc-{}-", Self::safe_owner(owner_key));
                 list.items
                     .iter()
+                    .filter(|s| !Self::is_expired(s))
                     .filter_map(|s| s.metadata.name.as_deref())
                     .filter_map(|n| n.strip_prefix(&prefix))
                     .map(|s| s.to_string())
@@ -145,16 +168,70 @@ impl SecretBackend for K8sSecretBackend {
         let api = self.api();
         let k8s_name = Self::secret_name(owner_key, name);
         match api.get_opt(&k8s_name).await {
-            Ok(Some(secret)) => secret
+            Ok(Some(secret)) if !Self::is_expired(&secret) => secret
                 .data
                 .as_ref()
                 .and_then(|d| d.get("value"))
                 .map(|b| String::from_utf8_lossy(&b.0).into_owned()),
-            Ok(None) => None,
+            Ok(_) => None,
             Err(e) => {
                 tracing::warn!("k8s: get_secret failed: {e}");
                 None
             }
         }
+    }
+
+    async fn store_secret_with_expiry(
+        &self,
+        owner_key: &str,
+        name: &str,
+        value: &str,
+        expires_at: SystemTime,
+    ) -> anyhow::Result<()> {
+        let k8s_name = Self::secret_name(owner_key, name);
+        let api = self.api();
+
+        let expires_secs = expires_at
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut labels = BTreeMap::new();
+        labels.insert("managed-by".to_string(), "sandcastle".to_string());
+        labels.insert("sc-owner".to_string(), Self::safe_owner(owner_key));
+
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            "sandcastle.metalbear.co/expires-at".to_string(),
+            expires_secs.to_string(),
+        );
+
+        let mut data = BTreeMap::new();
+        data.insert(
+            "value".to_string(),
+            k8s_openapi::ByteString(value.as_bytes().to_vec()),
+        );
+
+        let secret = Secret {
+            metadata: ObjectMeta {
+                name: Some(k8s_name.clone()),
+                namespace: Some(self.namespace.clone()),
+                labels: Some(labels),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            data: Some(data),
+            ..Default::default()
+        };
+
+        api.patch(
+            &k8s_name,
+            &PatchParams::apply("sandcastle").force(),
+            &Patch::Apply(&secret),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to store secret in k8s: {e}"))?;
+
+        Ok(())
     }
 }
