@@ -75,15 +75,12 @@ postgresql:
     password: ""
   storage: 10Gi
 
-# GitHub App for generating scoped installation tokens (used by the get_github_token MCP tool).
+# GitHub OAuth App client ID for the interactive Device Flow token tool (get_github_token).
 # Enables committing, pushing, and opening pull requests from within sandboxes.
-githubApp:
-  # Numeric GitHub App ID.
-  appId: ""
-  # PEM-encoded RSA private key. Literal \n sequences are accepted in place of real newlines.
-  privateKey: ""
-  # Installation ID of the app in the target organization or user account.
-  installationId: ""
+# Only the client_id is required — no private key or installation ID needed.
+# The same app used for auth.github can be reused here.
+githubDeviceFlow:
+  clientId: ""
 
 ingress:
   enabled: false

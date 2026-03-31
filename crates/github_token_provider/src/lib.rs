@@ -1,163 +1,161 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, anyhow};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::Client;
-use serde::Serialize;
 
-pub struct GitHubAppTokenProvider {
-    app_id: u64,
-    private_key_pem: String,
-    installation_id: u64,
+pub struct GitHubDeviceFlowProvider {
+    client_id: String,
     http: Client,
 }
 
-pub struct GitHubToken {
-    pub token: String,
-    pub expires_at: SystemTime,
+/// Returned by `start_flow` — contains what the user needs to authorize.
+pub struct DeviceFlowState {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+    pub interval: u64,
 }
 
-#[derive(Serialize)]
-struct AppClaims {
-    iat: i64,
-    exp: i64,
-    iss: String,
+/// Returned by `poll_token`.
+pub enum PollResult {
+    /// User has not yet authorized; caller should wait `interval` seconds and retry.
+    Pending,
+    /// Authorization complete. `expires_at` is `None` if the app does not use token expiration.
+    Complete {
+        token: String,
+        expires_at: Option<SystemTime>,
+    },
+    /// The device code has expired; a new flow must be started.
+    Expired,
 }
 
-impl GitHubAppTokenProvider {
-    pub fn new(app_id: u64, private_key_pem: String, installation_id: u64) -> Self {
+impl GitHubDeviceFlowProvider {
+    pub fn new(client_id: String) -> Self {
         Self {
-            app_id,
-            private_key_pem,
-            installation_id,
+            client_id,
             http: Client::new(),
         }
     }
 
-    /// Construct from environment variables. Returns `None` if `GITHUB_APP_ID` is not set
-    /// (feature is disabled). Returns `Err` if any required variable is present but malformed.
+    /// Construct from the `GITHUB_OAUTH_CLIENT_ID` environment variable.
+    /// Returns `None` if the variable is absent (feature disabled).
     pub fn from_env() -> anyhow::Result<Option<Self>> {
-        let app_id_str = match std::env::var("GITHUB_APP_ID") {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-
-        let app_id: u64 = app_id_str
-            .parse()
-            .context("GITHUB_APP_ID must be a numeric value")?;
-
-        let raw_key =
-            std::env::var("GITHUB_APP_PRIVATE_KEY").context("GITHUB_APP_PRIVATE_KEY not set")?;
-        // Support environments where the PEM is stored with literal \n instead of real newlines.
-        let private_key_pem = raw_key.replace("\\n", "\n");
-
-        let installation_id_str = std::env::var("GITHUB_APP_INSTALLATION_ID")
-            .context("GITHUB_APP_INSTALLATION_ID not set")?;
-        let installation_id: u64 = installation_id_str
-            .parse()
-            .context("GITHUB_APP_INSTALLATION_ID must be a numeric value")?;
-
-        Ok(Some(Self::new(app_id, private_key_pem, installation_id)))
+        match std::env::var("GITHUB_OAUTH_CLIENT_ID") {
+            Ok(id) if !id.is_empty() => Ok(Some(Self::new(id))),
+            Ok(_) | Err(_) => Ok(None),
+        }
     }
 
-    pub fn app_id(&self) -> u64 {
-        self.app_id
-    }
-
-    /// Generate a scoped GitHub installation token for the given repositories.
+    /// Begin a Device Flow authorization request.
     ///
-    /// `repos` may be bare names (`"my-repo"`) or prefixed (`"owner/my-repo"`).
-    /// Any `owner/` prefix is stripped — GitHub's API only accepts bare names scoped to the
-    /// configured installation.
-    pub async fn get_token(&self, repos: &[String]) -> anyhow::Result<GitHubToken> {
-        let jwt = self.make_jwt()?;
-
-        let bare_names: Vec<&str> = repos
-            .iter()
-            .map(|r| {
-                if let Some((_owner, name)) = r.split_once('/') {
-                    tracing::warn!(
-                        repo = %r,
-                        "get_github_token: stripping owner prefix from repository name"
-                    );
-                    name
-                } else {
-                    r.as_str()
-                }
-            })
-            .collect();
-
-        let body = serde_json::json!({
-            "repositories": bare_names,
-            "permissions": {
-                "contents": "write",
-                "pull_requests": "write"
-            }
-        });
-
-        let url = format!(
-            "https://api.github.com/app/installations/{}/access_tokens",
-            self.installation_id
-        );
-
+    /// `repos` is informational — Device Flow scopes are coarse-grained (`repo`),
+    /// not per-repository.  The caller may display the repo list to the user as
+    /// context for what they are authorizing.
+    pub async fn start_flow(&self, _repos: &[String]) -> anyhow::Result<DeviceFlowState> {
         let resp = self
             .http
-            .post(&url)
-            .bearer_auth(&jwt)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .post("https://github.com/login/device/code")
+            .header("Accept", "application/json")
             .header("User-Agent", "sandcastle")
-            .json(&body)
+            .form(&[("client_id", self.client_id.as_str()), ("scope", "repo")])
             .send()
             .await
-            .context("failed to contact GitHub API")?;
+            .context("failed to contact GitHub device code endpoint")?;
 
         let status = resp.status();
         if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
+            let text = resp.text().await.unwrap_or_default();
             return Err(anyhow!(
-                "GitHub API returned {}: {}",
+                "GitHub device code request failed {}: {}",
                 status.as_u16(),
-                body_text
+                text
             ));
         }
 
         let data: serde_json::Value = resp
             .json()
             .await
-            .context("failed to parse GitHub API response")?;
+            .context("failed to parse GitHub device code response")?;
 
-        let token = data["token"]
+        if let Some(err) = data["error"].as_str() {
+            return Err(anyhow!("GitHub device code error: {}", err));
+        }
+
+        let device_code = data["device_code"]
             .as_str()
-            .ok_or_else(|| anyhow!("GitHub API response missing 'token' field"))?
+            .ok_or_else(|| anyhow!("missing device_code in response"))?
             .to_string();
-
-        let expires_at_str = data["expires_at"]
+        let user_code = data["user_code"]
             .as_str()
-            .ok_or_else(|| anyhow!("GitHub API response missing 'expires_at' field"))?;
+            .ok_or_else(|| anyhow!("missing user_code in response"))?
+            .to_string();
+        let verification_uri = data["verification_uri"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing verification_uri in response"))?
+            .to_string();
+        let expires_in = data["expires_in"].as_u64().unwrap_or(900);
+        let interval = data["interval"].as_u64().unwrap_or(5);
 
-        let expires_at = humantime::parse_rfc3339(expires_at_str)
-            .with_context(|| format!("invalid expires_at from GitHub API: {expires_at_str}"))?;
-
-        Ok(GitHubToken { token, expires_at })
+        Ok(DeviceFlowState {
+            device_code,
+            user_code,
+            verification_uri,
+            expires_in,
+            interval,
+        })
     }
 
-    fn make_jwt(&self) -> anyhow::Result<String> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before UNIX epoch")?
-            .as_secs() as i64;
+    /// Poll GitHub once for the access token associated with `device_code`.
+    ///
+    /// The caller is responsible for respecting the `interval` from `start_flow`
+    /// between calls.
+    pub async fn poll_token(&self, device_code: &str) -> anyhow::Result<PollResult> {
+        let resp = self
+            .http
+            .post("https://github.com/login/oauth/access_token")
+            .header("Accept", "application/json")
+            .header("User-Agent", "sandcastle")
+            .form(&[
+                ("client_id", self.client_id.as_str()),
+                ("device_code", device_code),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ])
+            .send()
+            .await
+            .context("failed to contact GitHub token endpoint")?;
 
-        let claims = AppClaims {
-            iat: now - 60,
-            exp: now + 600,
-            iss: self.app_id.to_string(),
-        };
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "GitHub token poll failed {}: {}",
+                status.as_u16(),
+                text
+            ));
+        }
 
-        let key = EncodingKey::from_rsa_pem(self.private_key_pem.as_bytes())
-            .context("failed to parse GITHUB_APP_PRIVATE_KEY as RSA PEM")?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .context("failed to parse GitHub token response")?;
 
-        encode(&Header::new(Algorithm::RS256), &claims, &key)
-            .context("failed to sign GitHub App JWT")
+        if let Some(token) = data["access_token"].as_str().filter(|t| !t.is_empty()) {
+            // `expires_in` is present when the OAuth App has token expiration enabled.
+            let expires_at = data["expires_in"]
+                .as_u64()
+                .map(|secs| SystemTime::now() + Duration::from_secs(secs));
+            return Ok(PollResult::Complete {
+                token: token.to_string(),
+                expires_at,
+            });
+        }
+
+        match data["error"].as_str() {
+            Some("authorization_pending") | Some("slow_down") => Ok(PollResult::Pending),
+            Some("expired_token") => Ok(PollResult::Expired),
+            Some(other) => Err(anyhow!("GitHub token error: {}", other)),
+            None => Err(anyhow!("unexpected GitHub token response: {}", data)),
+        }
     }
 }
